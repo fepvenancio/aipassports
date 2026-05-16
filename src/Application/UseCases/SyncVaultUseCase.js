@@ -1,4 +1,6 @@
 import { Vault } from '../../Domain/Aggregates/Vault.js';
+import { Skill } from '../../Domain/Entities/Skill.js';
+import { WikiPage } from '../../Domain/Entities/WikiPage.js';
 
 /**
  * @title SyncVaultUseCase
@@ -43,8 +45,17 @@ export class SyncVaultUseCase {
       /* //////////////////////////////////////////////////////////////
                                 HYDRATE VAULT
       //////////////////////////////////////////////////////////////*/
-      // Note: In a full implementation, we'd map data to Entity instances
-      return new Vault(ownerId, data.skills || [], data.wikiPages || []);
+      /* //////////////////////////////////////////////////////////////
+                                HYDRATE VAULT
+      //////////////////////////////////////////////////////////////*/
+      const skills = (data.skills || []).map(s =>
+        new Skill(s.id, s.name, s.description, s.schema)
+      );
+      const wikiPages = (data.wikiPages || []).map(p =>
+        new WikiPage(p.slug, p.content, p.metadata)
+      );
+
+      return new Vault(ownerId, skills, wikiPages);
     } catch (error) {
       console.error('USE_CASE_ERROR_SYNC_FAILED', error);
       throw new Error('USE_CASE_ERROR_SYNC_FAILED');

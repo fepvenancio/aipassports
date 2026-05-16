@@ -5,8 +5,3 @@ node_modules/
 dist/
 build/
 *.bak
-smoke-test.js
-tests/debounce-validation.js
-tests/firewall-audit.js
-package-lock.json
-pnpm-lock.yaml

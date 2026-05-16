@@ -1,9 +1,11 @@
+import crypto from 'crypto';
 import { Vault } from './Domain/Aggregates/Vault.js';
 import { Skill } from './Domain/Entities/Skill.js';
 import { WikiPage } from './Domain/Entities/WikiPage.js';
 import { McpStdioServer } from './Infrastructure/Transport/McpStdioServer.js';
 import { McpSseServer } from './Infrastructure/Transport/McpSseServer.js';
-import { WebAuthnVerifier } from './Infrastructure/Crypto/WebAuthnVerifier.js';
+import { JwtAssertionVerifier } from './Infrastructure/Crypto/JwtAssertionVerifier.js';
+import { AESGCMEngine } from './Infrastructure/Crypto/AESGCMEngine.js';
 
 /**
  * @title Main Entry Point
@@ -45,16 +47,22 @@ async function main() {
   const transport = transportArg ? transportArg.split('=')[1] : 'stdio';
 
   if (transport === 'sse') {
-    const verifier = new WebAuthnVerifier();
-    const cryptoEngine = new AESGCMEngine(crypto.randomBytes(32)); // Placeholder for actual master key
-    
-    // Determine which storage to use based on env
-    const storage = process.env.R2_ACCOUNT_ID 
-      ? new (await import('./Infrastructure/Storage/CloudflareR2Adapter.js')).CloudflareR2Adapter()
-      : new (await import('./Infrastructure/Storage/LocalFileSystemAdapter.js')).LocalFileSystemAdapter();
+    const verifier = new JwtAssertionVerifier();
+    const masterKey = crypto.randomBytes(32);
+    const cryptoEngine = new AESGCMEngine(masterKey);
 
-    const syncService = new (await import('./Application/Services/SyncService.js')).SyncService(storage, cryptoEngine);
-    const proxyClient = new (await import('./Infrastructure/Transport/ZdrProxyClient.js')).ZdrProxyClient();
+    // Determine which storage to use based on env
+    const { CloudflareR2Adapter } = await import('./Infrastructure/Storage/CloudflareR2Adapter.js');
+    const { LocalFileSystemAdapter } = await import('./Infrastructure/Storage/LocalFileSystemAdapter.js');
+    const { SyncService } = await import('./Application/Services/SyncService.js');
+    const { ZdrProxyClient } = await import('./Infrastructure/Transport/ZdrProxyClient.js');
+
+    const storage = process.env.R2_ACCOUNT_ID 
+      ? new CloudflareR2Adapter()
+      : new LocalFileSystemAdapter();
+
+    const syncService = new SyncService(storage, cryptoEngine);
+    const proxyClient = new ZdrProxyClient();
     const sseServer = new McpSseServer(vault, verifier, syncService, proxyClient);
     
     console.error("🚀 Project Aegis: Booting SSE Gateway...");

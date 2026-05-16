@@ -13,16 +13,29 @@ export class SyncService {
   _cryptoEngine;
   _timers;
   _pendingStates;
+  _debounceMs;
 
   /**
    * @param {ISyncProvider} syncProvider - Concrete storage adapter (e.g., CloudflareR2Adapter).
    * @param {ICryptoEngine} cryptoEngine - Concrete crypto adapter (e.g., AESGCMEngine).
+   * @param {object} [options] - Optional configuration.
+   * @param {number} [options.debounceMs=30000] - Debounce window in milliseconds.
    */
-  constructor(syncProvider, cryptoEngine) {
+  constructor(syncProvider, cryptoEngine, options = {}) {
     this._syncProvider = syncProvider;
     this._cryptoEngine = cryptoEngine;
     this._timers = new Map(); // vaultId -> timeoutId
     this._pendingStates = new Map(); // vaultId -> { state, dek }
+    this._debounceMs = options.debounceMs ?? 30000;
+
+    // Register graceful shutdown to flush pending debounce states
+    const shutdown = async (signal) => {
+      console.error(`[SYNC_SERVICE] Received ${signal}, flushing pending states...`);
+      await this.flush();
+      process.exit(0);
+    };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -69,9 +82,10 @@ export class SyncService {
           })
           .catch((error) => {
             console.error(`[SYNC_SERVICE_DEBOUNCE_FAILURE] ${vaultId}:`, error.message);
+            // Retain pending state for potential retry on shutdown flush
           });
       }
-    }, 30000);
+    }, this._debounceMs);
 
     this._timers.set(vaultId, timeoutId);
   }
@@ -79,6 +93,30 @@ export class SyncService {
   /* //////////////////////////////////////////////////////////////
                           INTERNAL LOGIC
   //////////////////////////////////////////////////////////////*/
+
+  /**
+   * @notice Flushes all pending debounce states immediately.
+   * @dev Called during graceful shutdown to prevent data loss.
+   * @returns {Promise<void>}
+   */
+  async flush() {
+    const pendingIds = [...this._pendingStates.keys()];
+    for (const vaultId of pendingIds) {
+      const pending = this._pendingStates.get(vaultId);
+      if (pending) {
+        if (this._timers.has(vaultId)) {
+          clearTimeout(this._timers.get(vaultId));
+        }
+        try {
+          await this._performSync(vaultId, pending.state, pending.dek);
+        } catch (error) {
+          console.error(`[SYNC_SERVICE_FLUSH_FAILURE] ${vaultId}:`, error.message);
+        }
+        this._pendingStates.delete(vaultId);
+        this._timers.delete(vaultId);
+      }
+    }
+  }
 
   /**
    * @notice Internal helper to encrypt and push data.

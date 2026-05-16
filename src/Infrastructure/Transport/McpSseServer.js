@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -11,7 +12,7 @@ import {
 /**
  * @title McpSseServer
  * @notice HTTP/SSE transport for the Sovereign AI Passport.
- * @dev Implements passwordless WebAuthn unlocking and SSE streaming.
+ * @dev Implements passwordless JWT assertion unlocking and SSE streaming.
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -25,8 +26,7 @@ export class McpSseServer {
   #verifier;
   #syncService;
   #proxyClient;
-  #transport;
-  #isLocked;
+  #sessions;
 
   /**
    * @param {Vault} vault - The domain aggregate.
@@ -39,7 +39,7 @@ export class McpSseServer {
     this.#verifier = verifier;
     this.#syncService = syncService;
     this.#proxyClient = proxyClient;
-    this.#isLocked = true; // MUST be locked by default
+    this.#sessions = new Map(); // sessionId -> { transport, authenticated }
     this.#app = express();
     this.#app.use(express.json());
 
@@ -57,33 +57,44 @@ export class McpSseServer {
   //////////////////////////////////////////////////////////////*/
 
   _setupMcpHandlers() {
-    this.#server.setRequestHandler(ListToolsRequestSchema, async () => {
-      this._checkLock();
-      return {
-        tools: this.#vault.skills.map(skill => ({
-          name: skill.id,
-          description: skill.description,
-          inputSchema: skill.schema
-        }))
-      };
-    });
+    this.#server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: this.#vault.skills.map(skill => ({
+        name: skill.id,
+        description: skill.description,
+        inputSchema: skill.schema
+      }))
+    }));
 
     this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      this._checkLock();
-      // Logic for tool execution
       return { content: [{ type: "text", text: `SSE execution of ${request.params.name}` }] };
     });
 
-    this.#server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      this._checkLock();
-      return {
-        resources: this.#vault.wikiPages.map(page => ({
-          uri: `wiki://${page.slug}`,
-          name: page.slug,
-          mimeType: "text/markdown"
-        }))
-      };
-    });
+    this.#server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: this.#vault.wikiPages.map(page => ({
+        uri: `wiki://${page.slug}`,
+        name: page.slug,
+        mimeType: "text/markdown"
+      }))
+    }));
+  }
+
+  /* //////////////////////////////////////////////////////////////
+                        AUTH MIDDLEWARE
+  //////////////////////////////////////////////////////////////*/
+
+  /**
+   * @notice Express middleware enforcing identity verification on protected routes.
+   * @dev Rejects requests that lack a valid session with authentication.
+   */
+  _requireAuth(req, res, next) {
+    const sessionId = req.headers['x-session-id'];
+    const session = this.#sessions.get(sessionId);
+
+    if (!sessionId || !session || !session.authenticated) {
+      return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_REQUIRED" });
+    }
+
+    next();
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -93,36 +104,57 @@ export class McpSseServer {
   _setupRoutes() {
     /**
      * @notice Identity Unlock Route (FR-4.2).
-     * Validates Passkey assertion before allowing transport hydration.
+     * Validates Passkey-derived JWT assertion before allowing transport hydration.
+     * Returns a session ID that must be used for subsequent requests.
      */
     this.#app.post("/auth/unlock", async (req, res) => {
       try {
-        const { token, publicKey, dek } = req.body;
+        const { token, publicKey } = req.body;
+
+        if (!token || !publicKey) {
+          return res.status(400).json({ error: "MISSING_CREDENTIALS" });
+        }
+
         const isValid = await this.#verifier.verifyAssertion(token, publicKey);
 
         if (isValid) {
-          this.#isLocked = false; // Transition to UNLOCKED state
-          // Trigger immediate sync on unlock to ensure cloud is current
-          if (dek) {
-            this.#syncService.immediateSync(this.#vault.ownerId, this.#vault.toJSON(), Buffer.from(dek, 'hex'));
-          }
-          res.status(200).json({ status: "UNLOCKED", vaultId: this.#vault.ownerId });
+          const sessionId = crypto.randomUUID();
+          this.#sessions.set(sessionId, { authenticated: true, createdAt: Date.now() });
+
+          // Trigger immediate sync on unlock
+          this.#syncService.immediateSync(this.#vault.ownerId, this.#vault.toJSON());
+
+          res.status(200).json({ status: "UNLOCKED", vaultId: this.#vault.ownerId, sessionId });
         } else {
           res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_FAILED" });
         }
       } catch (error) {
+        console.error("[AUTH_ERROR]", error.message);
         res.status(500).json({ error: "INTERNAL_AUTH_ERROR" });
       }
     });
 
     /**
      * @notice SSE Connection Endpoint.
-     * Establishes the persistent persistent event stream.
+     * Establishes the persistent event stream. Requires prior authentication.
      */
     this.#app.get("/mcp/sse", async (req, res) => {
-      console.error("[SSE_CONNECTION_INITIATED]");
-      this.#transport = new SSEServerTransport("/mcp/messages", res);
-      await this.#server.connect(this.#transport);
+      const sessionId = req.headers['x-session-id'];
+      const session = this.#sessions.get(sessionId);
+
+      if (!sessionId || !session || !session.authenticated) {
+        return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_REQUIRED" });
+      }
+
+      console.error("[SSE_CONNECTION_INITIATED]", sessionId);
+      const transport = new SSEServerTransport("/mcp/messages", res);
+      this.#sessions.get(sessionId).transport = transport;
+
+      try {
+        await this.#server.connect(transport);
+      } catch (error) {
+        console.error("[SSE_CONNECT_ERROR]", error.message);
+      }
     });
 
     /**
@@ -130,22 +162,15 @@ export class McpSseServer {
      * Receives JSON-RPC frames to be processed by the server.
      */
     this.#app.post("/mcp/messages", async (req, res) => {
-      if (this.#transport) {
-        await this.#transport.handlePostMessage(req, res);
-      } else {
-        res.status(400).json({ error: "TRANSPORT_NOT_INITIALIZED" });
+      const sessionId = req.headers['x-session-id'];
+      const session = this.#sessions.get(sessionId);
+
+      if (!sessionId || !session || !session.authenticated || !session.transport) {
+        return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_REQUIRED" });
       }
+
+      await session.transport.handlePostMessage(req, res);
     });
-  }
-
-  /* //////////////////////////////////////////////////////////////
-                            HELPERS
-  //////////////////////////////////////////////////////////////*/
-
-  _checkLock() {
-    if (this.#isLocked) {
-      throw new Error("SECURITY_ERROR_VAULT_LOCKED: Biometric assertion required.");
-    }
   }
 
   /* //////////////////////////////////////////////////////////////

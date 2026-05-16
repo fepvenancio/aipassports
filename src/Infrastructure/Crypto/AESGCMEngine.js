@@ -31,19 +31,22 @@ export class AESGCMEngine extends ICryptoEngine {
   /**
    * @notice Encrypts plaintext using AES-256-GCM with automated IV derivation.
    * @param {string} plaintext - The raw string to encrypt.
+   * @param {Buffer} [dek] - Optional Data Encryption Key (32 bytes). Falls back to master key.
    * @returns {Promise<EncryptedBlob>}
    */
-  async encrypt(plaintext) {
+  async encrypt(plaintext, dek) {
     if (typeof plaintext !== 'string') {
       throw new Error('INFRA_ERROR_CRYPTO_INVALID_PLAINTEXT_TYPE');
     }
+
+    const key = dek ?? this.#masterKey;
 
     try {
       // 1. Derive unique 12-byte initialization vector (nonce)
       const iv = crypto.randomBytes(12);
 
       // 2. Initialize cipher with GCM mode
-      const cipher = crypto.createCipheriv('aes-256-gcm', this.#masterKey, iv);
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
       
       // 3. Perform encryption
       let ciphertext = cipher.update(plaintext, 'utf8', 'base64');
@@ -65,15 +68,18 @@ export class AESGCMEngine extends ICryptoEngine {
   /**
    * @notice Decrypts an EncryptedBlob and verifies its authenticity tag.
    * @param {EncryptedBlob} blob - The authenticated ciphertext packet.
+   * @param {Buffer} [dek] - Optional Data Encryption Key (32 bytes). Falls back to master key.
    * @returns {Promise<string>}
    */
-  async decrypt(blob) {
+  async decrypt(blob, dek) {
+    const key = dek ?? this.#masterKey;
+
     try {
       const iv = Buffer.from(blob.nonce, 'base64');
       const tag = Buffer.from(blob.tag, 'base64');
 
       // 1. Initialize decipher
-      const decipher = crypto.createDecipheriv('aes-256-gcm', this.#masterKey, iv);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       
       // 2. Set expected authentication tag
       decipher.setAuthTag(tag);

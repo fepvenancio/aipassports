@@ -11,17 +11,19 @@
 export class ICryptoEngine {
   /**
    * @notice Encrypts data using AES-256-GCM.
-   * @param {string} plaintext 
+   * @param {string} plaintext - The raw string to encrypt.
+   * @param {Buffer} [dek] - Optional Data Encryption Key. Falls back to master key.
    * @returns {Promise<EncryptedBlob>}
    */
-  async encrypt(plaintext) { throw new Error('NOT_IMPLEMENTED'); }
+  async encrypt(plaintext, dek) { throw new Error('NOT_IMPLEMENTED'); }
 
   /**
    * @notice Decrypts an EncryptedBlob.
-   * @param {EncryptedBlob} blob 
+   * @param {EncryptedBlob} blob - The authenticated ciphertext packet.
+   * @param {Buffer} [dek] - Optional Data Encryption Key. Falls back to master key.
    * @returns {Promise<string>}
    */
-  async decrypt(blob) { throw new Error('NOT_IMPLEMENTED'); }
+  async decrypt(blob, dek) { throw new Error('NOT_IMPLEMENTED'); }
 
   /**
    * @notice Shreds the master KEK (Right to Forgotten).

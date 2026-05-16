@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { ISyncProvider } from "../../Application/Ports/ISyncProvider.js";
+import { EncryptedBlob } from "../../Domain/ValueObjects/EncryptedBlob.js";
 
 /**
  * @title CloudflareR2Adapter
@@ -84,7 +85,6 @@ export class CloudflareR2Adapter extends ISyncProvider {
       const rawData = await response.Body.transformToString();
       const { ciphertext, nonce, tag } = JSON.parse(rawData);
 
-      const { EncryptedBlob } = await import("../../Domain/ValueObjects/EncryptedBlob.js");
       return new EncryptedBlob(ciphertext, nonce, tag);
     } catch (error) {
       console.error("[R2_PULL_ERROR]", error.message);

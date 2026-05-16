@@ -5,7 +5,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node smoke-test.js && node tests/debounce-validation.js && node tests/firewall-audit.js",
+    "test:smoke": "node smoke-test.js",
+    "test:debounce": "node tests/debounce-validation.js",
+    "test:firewall": "node tests/firewall-audit.js"
   },
   "keywords": [],
   "author": "",

@@ -24,10 +24,10 @@ COPY --from=builder /usr/src/app ./
 
 # Setup explicit non-root system application user for isolation
 RUN addgroup -S aegisgroup && adduser -S aegisuser -G aegisgroup
-RUN mkdir -p /root/.ai-passport && chown -R aegisuser:aegisgroup /root/.ai-passport
 
-# Ensure the user has a home directory and permissions are correct
-# Note: Using /root/ is non-standard for non-root users, but matching the blueprint requirements.
+# Create data directory at /home/aegisuser/.ai-passport accessible by non-root user
+RUN mkdir -p /home/aegisuser/.ai-passport && chown -R aegisuser:aegisgroup /home/aegisuser/.ai-passport
+
 EXPOSE 8080
 USER aegisuser
 

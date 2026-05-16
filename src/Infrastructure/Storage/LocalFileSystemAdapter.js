@@ -1,12 +1,14 @@
+import crypto from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { ISyncProvider } from '../../Application/Ports/ISyncProvider.js';
+import { EncryptedBlob } from '../../Domain/ValueObjects/EncryptedBlob.js';
 
 /**
  * @title LocalFileSystemAdapter
  * @notice Sovereign storage implementation for the Free Tier AI Passport.
- * @dev Manages encrypted payloads inside the ~/.ai-passport directory.
+ * @dev Manages encrypted payloads inside ~/.ai-passport (or LOCAL_VAULT_PATH).
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -17,11 +19,12 @@ export class LocalFileSystemAdapter extends ISyncProvider {
   #basePath;
 
   /**
-   * @param {string} basePath - The root sovereign directory.
+   * @param {string} [basePath] - The root sovereign directory.
+   * Defaults to LOCAL_VAULT_PATH env var, then ~/.ai-passport.
    */
-  constructor(basePath = path.join(os.homedir(), '.ai-passport')) {
+  constructor(basePath) {
     super();
-    this.#basePath = basePath;
+    this.#basePath = basePath ?? process.env.LOCAL_VAULT_PATH ?? path.join(os.homedir(), '.ai-passport');
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -29,7 +32,7 @@ export class LocalFileSystemAdapter extends ISyncProvider {
   //////////////////////////////////////////////////////////////*/
 
   /**
-   * @notice Persists an encrypted payload safely to disk.
+   * @notice Persists an encrypted payload safely to disk using atomic write-then-rename.
    * @param {string} key - The relative path/filename.
    * @param {EncryptedBlob} blob - The encrypted data packet.
    */
@@ -49,9 +52,10 @@ export class LocalFileSystemAdapter extends ISyncProvider {
         timestamp: Date.now()
       }, null, 2);
 
-      // 3. Atomic-style write (Write then rename would be safer for production, 
-      // but simple write is standard for alpha)
-      await fs.writeFile(destination, payload, 'utf-8');
+      // 3. Atomic write: write to temp file, then rename
+      const tmpFile = destination + '.tmp.' + crypto.randomBytes(6).toString('hex');
+      await fs.writeFile(tmpFile, payload, 'utf-8');
+      await fs.rename(tmpFile, destination);
     } catch (error) {
       throw new Error(`INFRA_ERROR_STORAGE_WRITE_FAILED: ${error.message}`);
     }
@@ -69,9 +73,6 @@ export class LocalFileSystemAdapter extends ISyncProvider {
       const rawData = await fs.readFile(source, 'utf-8');
       const { ciphertext, nonce, tag } = JSON.parse(rawData);
 
-      // Dynamic import to maintain domain layer isolation
-      const { EncryptedBlob } = await import('../../Domain/ValueObjects/EncryptedBlob.js');
-      
       return new EncryptedBlob(ciphertext, nonce, tag);
     } catch (error) {
       if (error.code === 'ENOENT') {
@@ -104,8 +105,8 @@ export class LocalFileSystemAdapter extends ISyncProvider {
    * @returns {string}
    */
   _resolvePath(key) {
-    const resolved = path.join(this.#basePath, key);
-    if (!resolved.startsWith(this.#basePath)) {
+    const resolved = path.resolve(this.#basePath, key);
+    if (!resolved.startsWith(path.resolve(this.#basePath))) {
       throw new Error('SECURITY_ERROR_DIRECTORY_TRAVERSAL_DETECTED');
     }
     return resolved;

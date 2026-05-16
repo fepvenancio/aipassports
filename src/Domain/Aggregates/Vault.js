@@ -1,3 +1,6 @@
+import { WikiPage } from '../Entities/WikiPage.js';
+import { Skill } from '../Entities/Skill.js';
+
 /**
  * @title Vault Aggregate
  * @notice Coordinates business invariants for the Sovereign AI Passport.
@@ -29,6 +32,22 @@ export class Vault {
   get wikiPages() { return [...this.#wikiPages]; }
 
   /**
+   * @notice Deserializes a vault from its JSON representation.
+   * @dev Reconstitutes Skill and WikiPage entities from plain objects.
+   * @param {object} json - The JSON object from toJSON().
+   * @returns {Vault}
+   */
+  static fromJSON(json) {
+    const skills = (json.skills || []).map(s =>
+      new Skill(s.id, s.name, s.description, s.schema)
+    );
+    const wikiPages = (json.wikiPages || []).map(p =>
+      new WikiPage(p.slug, p.content, p.metadata)
+    );
+    return new Vault(json.ownerId, skills, wikiPages);
+  }
+
+  /**
    * @notice Serializes the vault state for synchronization.
    * @returns {object}
    */
@@ -57,20 +76,28 @@ export class Vault {
 
   /**
    * @notice Ingests a wiki page, ensuring memory consistency.
-   * @param {WikiPage} page 
+   * @param {WikiPage|object} page - WikiPage entity or plain object { slug, content, metadata }.
    */
   ingestWikiPage(page) {
-    const existing = this.#wikiPages.find(p => p.slug === page.slug);
+    // Accept both WikiPage instances and plain objects from deserialization
+    const slug = page instanceof WikiPage ? page.slug : page.slug;
+    const existing = this.#wikiPages.find(p => p.slug === slug);
     if (existing) {
-      // In a real implementation, this would trigger contradiction mitigation logic
       this._mitigateContradiction(existing, page);
     } else {
-      this.#wikiPages.push(page);
+      const wikiPage = page instanceof WikiPage ? page : new WikiPage(page.slug, page.content, page.metadata);
+      this.#wikiPages.push(wikiPage);
     }
   }
 
   _mitigateContradiction(existing, incoming) {
-    // TODO: Implement contradiction mitigation (FR-3.2)
-    console.log(`Mitigating contradiction for ${existing.slug}`);
+    // FR-3.2: Contradiction mitigation — log anomaly and adjust confidence
+    const incomingPage = incoming instanceof WikiPage ? incoming : new WikiPage(incoming.slug, incoming.content, incoming.metadata);
+    const incomingConfidence = incomingPage.metadata?.confidence ?? 0.5;
+    const existingConfidence = existing.metadata?.confidence ?? 1.0;
+
+    // Reduce existing confidence when a contradiction is detected
+    existing.updateConfidence(existingConfidence * 0.8);
+    console.log(`[CONTRADICTION] ${existing.slug}: confidence reduced to ${existingConfidence * 0.8} due to conflicting update (incoming confidence: ${incomingConfidence})`);
   }
 }

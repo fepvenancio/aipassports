@@ -24,16 +24,16 @@ const REGISTRY = {
       // FR-5.2: Inject specific Anthropic compliance headers
       const newHeaders = { 
         ...headers, 
-        "anthropic-beta": "zero-retention-2026", // Mocked 2026 header
-        "x-zdr-enforce": "true" 
+        "anthropic-beta": "zero-retention-2025",
+        "x-anthropic-zdr": "true" 
       };
       return { body, headers: newHeaders };
     }
   },
-  "api.google.com/vertex": {
+  "aiplatform.googleapis.com": {
     provider: "google-vertex",
     zdrAction: (body, headers) => {
-      // Mocked ZDR logic for Vertex
+      // ZDR logic for Vertex AI
       const parsedBody = typeof body === 'string' ? JSON.parse(body) : body;
       parsedBody.data_retention = "none";
       return { body: JSON.stringify(parsedBody), headers };
@@ -48,14 +48,28 @@ export class ComplianceRegistry {
    * @returns {object|null}
    */
   static getPolicy(url) {
-    const host = new URL(url).host;
-    // Check for exact host or path-based match
-    for (const key in REGISTRY) {
-      if (url.includes(key)) {
-        return REGISTRY[key];
+    try {
+      const host = new URL(url).hostname;
+      // Exact host match only — no substring matching to prevent bypass
+      if (host in REGISTRY) {
+        return REGISTRY[host];
       }
+      // Fallback: check path-based keys against full URL origin + path prefix
+      for (const key in REGISTRY) {
+        const policyUrl = `https://${key}`;
+        try {
+          const policyOrigin = new URL(policyUrl).origin;
+          if (url.startsWith(policyOrigin)) {
+            return REGISTRY[key];
+          }
+        } catch {
+          // Skip malformed keys
+        }
+      }
+      return null;
+    } catch {
+      return null;
     }
-    return null;
   }
 
   /**

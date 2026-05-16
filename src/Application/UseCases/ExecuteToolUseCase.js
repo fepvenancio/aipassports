@@ -13,7 +13,7 @@ export class ExecuteToolUseCase {
    * @param {Vault} vault 
    * @param {string} skillId 
    * @param {object} params 
-   * @returns {object} The prepared execution context.
+   * @returns {Promise<object>} The prepared execution context.
    */
   async execute(vault, skillId, params) {
     const skill = vault.skills.find(s => s.id === skillId);
@@ -26,9 +26,11 @@ export class ExecuteToolUseCase {
                             VALIDATE PARAMS
     //////////////////////////////////////////////////////////////*/
     // TODO: Implement JSON Schema validation against skill.schema
+    // using a library like ajv for production-grade validation.
 
     return {
-      skill,
+      skillId: skill.id,
+      skillName: skill.name,
       params,
       timestamp: Date.now()
     };

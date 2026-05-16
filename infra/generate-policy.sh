@@ -37,6 +37,9 @@ CCE_POLICY=$(echo "TCB_IMAGE=${IMAGE_HASH}_TCB_FS=${FS_HASH}" | base64)
 # 4. Inject Policy into Manifest
 echo "💉 Injecting Base64 CCE Policy into $MANIFEST..."
 sed -i.bak "s/\[placeholder_for_generated_policy_base64\]/$CCE_POLICY/" $MANIFEST
+# Portable sed: on macOS, -i.bak is required; on Linux, -i works alone.
+# Cleanup backup file
+rm -f "${MANIFEST}.bak"
 
 echo "🎉 Policy Generation Complete."
 echo "✅ TCB Measurement: $FS_HASH"

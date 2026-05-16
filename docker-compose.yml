@@ -7,10 +7,10 @@ services:
     container_name: aegis_passport_local
     restart: unless-stopped
     volumes:
-      # Maps your local machine vault directory securely inside the isolated application context
-      - ~/.ai-passport:/root/.ai-passport
+      # Maps local vault directory to the non-root user's home directory
+      - ~/.ai-passport:/home/aegisuser/.ai-passport
     environment:
-      - LOCAL_VAULT_PATH=/root/.ai-passport
+      - LOCAL_VAULT_PATH=/home/aegisuser/.ai-passport
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
