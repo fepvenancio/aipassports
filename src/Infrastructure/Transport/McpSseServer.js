@@ -26,6 +26,7 @@ export class McpSseServer {
   #syncService;
   #proxyClient;
   #transport;
+  #isLocked;
 
   /**
    * @param {Vault} vault - The domain aggregate.
@@ -38,6 +39,7 @@ export class McpSseServer {
     this.#verifier = verifier;
     this.#syncService = syncService;
     this.#proxyClient = proxyClient;
+    this.#isLocked = true; // MUST be locked by default
     this.#app = express();
     this.#app.use(express.json());
 
@@ -55,26 +57,33 @@ export class McpSseServer {
   //////////////////////////////////////////////////////////////*/
 
   _setupMcpHandlers() {
-    this.#server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.#vault.skills.map(skill => ({
-        name: skill.id,
-        description: skill.description,
-        inputSchema: skill.schema
-      }))
-    }));
+    this.#server.setRequestHandler(ListToolsRequestSchema, async () => {
+      this._checkLock();
+      return {
+        tools: this.#vault.skills.map(skill => ({
+          name: skill.id,
+          description: skill.description,
+          inputSchema: skill.schema
+        }))
+      };
+    });
 
     this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      this._checkLock();
       // Logic for tool execution
       return { content: [{ type: "text", text: `SSE execution of ${request.params.name}` }] };
     });
 
-    this.#server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-      resources: this.#vault.wikiPages.map(page => ({
-        uri: `wiki://${page.slug}`,
-        name: page.slug,
-        mimeType: "text/markdown"
-      }))
-    }));
+    this.#server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      this._checkLock();
+      return {
+        resources: this.#vault.wikiPages.map(page => ({
+          uri: `wiki://${page.slug}`,
+          name: page.slug,
+          mimeType: "text/markdown"
+        }))
+      };
+    });
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -88,10 +97,11 @@ export class McpSseServer {
      */
     this.#app.post("/auth/unlock", async (req, res) => {
       try {
-        const { token, publicKey, dek } = req.body; // Expecting DEK for initial sync check
+        const { token, publicKey, dek } = req.body;
         const isValid = await this.#verifier.verifyAssertion(token, publicKey);
 
         if (isValid) {
+          this.#isLocked = false; // Transition to UNLOCKED state
           // Trigger immediate sync on unlock to ensure cloud is current
           if (dek) {
             this.#syncService.immediateSync(this.#vault.ownerId, this.#vault.toJSON(), Buffer.from(dek, 'hex'));
@@ -126,6 +136,16 @@ export class McpSseServer {
         res.status(400).json({ error: "TRANSPORT_NOT_INITIALIZED" });
       }
     });
+  }
+
+  /* //////////////////////////////////////////////////////////////
+                            HELPERS
+  //////////////////////////////////////////////////////////////*/
+
+  _checkLock() {
+    if (this.#isLocked) {
+      throw new Error("SECURITY_ERROR_VAULT_LOCKED: Biometric assertion required.");
+    }
   }
 
   /* //////////////////////////////////////////////////////////////
