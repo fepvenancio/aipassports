@@ -5,3 +5,6 @@ node_modules/
 dist/
 build/
 *.bak
+.planning/
+.repo-audit/frontend/
+frontend/

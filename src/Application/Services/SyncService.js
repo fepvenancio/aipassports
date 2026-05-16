@@ -27,15 +27,6 @@ export class SyncService {
     this._timers = new Map(); // vaultId -> timeoutId
     this._pendingStates = new Map(); // vaultId -> { state, dek }
     this._debounceMs = options.debounceMs ?? 30000;
-
-    // Register graceful shutdown to flush pending debounce states
-    const shutdown = async (signal) => {
-      console.error(`[SYNC_SERVICE] Received ${signal}, flushing pending states...`);
-      await this.flush();
-      process.exit(0);
-    };
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -50,7 +41,6 @@ export class SyncService {
    * @param {Buffer} dek - The Data Encryption Key.
    */
   immediateSync(vaultId, aggregateState, dek) {
-    // Fire-and-forget: we do not await the encryption or the upload
     this._performSync(vaultId, aggregateState, dek).catch((error) => {
       console.error(`[SYNC_SERVICE_CRITICAL_FAILURE] ${vaultId}:`, error.message);
     });
@@ -58,16 +48,14 @@ export class SyncService {
 
   /**
    * @notice Queues a debounced synchronization task.
-   * @dev Batches high-frequency updates into a single encrypted upload after a 30s idle window.
+   * @dev Batches high-frequency updates into a single encrypted upload after an idle window.
    * @param {string} vaultId - Unique identifier for the vault storage key.
    * @param {object} aggregateState - The raw JS object representing the vault state.
    * @param {Buffer} dek - The Data Encryption Key.
    */
   queueDebouncedSync(vaultId, aggregateState, dek) {
-    // 1. Update the latest pending state
     this._pendingStates.set(vaultId, { state: aggregateState, dek });
 
-    // 2. Reset the timer window (30 seconds)
     if (this._timers.has(vaultId)) {
       clearTimeout(this._timers.get(vaultId));
     }
@@ -82,7 +70,6 @@ export class SyncService {
           })
           .catch((error) => {
             console.error(`[SYNC_SERVICE_DEBOUNCE_FAILURE] ${vaultId}:`, error.message);
-            // Retain pending state for potential retry on shutdown flush
           });
       }
     }, this._debounceMs);
@@ -91,7 +78,7 @@ export class SyncService {
   }
 
   /* //////////////////////////////////////////////////////////////
-                          INTERNAL LOGIC
+                          LIFECYCLE
   //////////////////////////////////////////////////////////////*/
 
   /**
@@ -119,22 +106,32 @@ export class SyncService {
   }
 
   /**
+   * @notice Tears down the service: clears timers and pending state.
+   * @dev Call flush() before destroy() if you want to persist pending data.
+   */
+  destroy() {
+    for (const [, timeoutId] of this._timers) {
+      clearTimeout(timeoutId);
+    }
+    this._timers.clear();
+    this._pendingStates.clear();
+  }
+
+  /* //////////////////////////////////////////////////////////////
+                          INTERNAL LOGIC
+  //////////////////////////////////////////////////////////////*/
+
+  /**
    * @notice Internal helper to encrypt and push data.
    * @dev Fault-tolerant wrapper for storage operations.
    */
   async _performSync(vaultId, state, dek) {
     try {
       const plaintext = JSON.stringify(state);
-      
-      // 1. Encrypt with DEK
       const encryptedBlob = await this._cryptoEngine.encrypt(plaintext, dek);
-
-      // 2. Push to Sync Provider
       await this._syncProvider.push(`${vaultId}/vault.json`, encryptedBlob);
-      
       console.error(`[SYNC_SERVICE] Successfully persisted ${vaultId} to cloud.`);
     } catch (error) {
-      // Circuit breaking: log and fail gracefully without crashing the main loop
       throw new Error(`PERFORM_SYNC_FAILED: ${error.message}`);
     }
   }

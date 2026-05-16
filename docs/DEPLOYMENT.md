@@ -1,6 +1,6 @@
-# DEPLOY-001: Confidential Deployment Specification
+# DEPLOY-002: Confidential Deployment Specification
 
-The keywords "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",  "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+The keywords "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
 ## 1. Runtime Environment
 
@@ -14,7 +14,16 @@ Project Aegis SHALL be deployed within a serverless Trusted Execution Environmen
 
 ### 2.2 Privilege Isolation
 - The container MUST run as a non-root user (`aegisuser`).
-- Root privileges SHOULD be dropped immediately after the container boot sequence.
+- Root privileges MUST be dropped immediately after the container boot sequence.
+- The data directory MUST be at `/home/aegisuser/.ai-passport` with correct ownership (`aegisuser:aegisgroup`).
+
+### 2.3 Request Body Limits
+- Express MUST enforce a maximum request body size of 100KB (`express.json({ limit: '100kb' })`).
+
+### 2.4 Security Headers
+- The application MUST set `X-Content-Type-Options: nosniff` on all responses.
+- The application MUST set `X-Frame-Options: DENY` on all responses.
+- The application MUST set `Cache-Control: no-store` on all responses.
 
 ## 3. Remote Attestation
 
@@ -28,5 +37,25 @@ Project Aegis SHALL be deployed within a serverless Trusted Execution Environmen
 
 ## 4. Secret Management
 
-- Credentials (e.g., R2 API keys) MUST NOT be stored in plaintext.
-- Secrets MUST be injected as `secureValue` parameters, decryptable only within the hardware enclave after successful attestation.
+- Credentials (e.g., R2 API keys) MUST NOT be stored in plaintext in the image or compose file.
+- Secrets MUST be injected as `secureValue` parameters in the deployment manifest, decryptable only within the hardware enclave after successful attestation.
+- The `generate-policy.sh` script MUST clean up any `.bak` files created during policy injection.
+
+## 5. Transport Modes
+
+### 5.1 Stdio Mode (Local Alpha)
+- The application SHALL accept `--transport=stdio` to run as a local JSON-RPC 2.0 server over stdin/stdout.
+- No authentication is required in stdio mode (assumed local trust).
+- Vault data MUST be loaded from `LOCAL_VAULT_PATH` or `~/.ai-passport`.
+
+### 5.2 Streamable HTTP Mode (Cloud Deployment)
+- The application SHALL accept `--transport=sse` to run as an HTTP server with Streamable HTTP transport.
+- Port SHALL default to 8080.
+- All SSE endpoints except `/health` and `/auth/challenge` MUST require authentication.
+- Sessions MUST be managed by `SessionManager` with TTL-based expiry and periodic cleanup.
+
+## 6. Graceful Shutdown
+
+- The application MUST register coordinated SIGTERM and SIGINT handlers in `main.js`.
+- Shutdown sequence MUST be: flush SyncService → destroy SyncService → shutdown SessionManager → close servers → exit.
+- No individual component SHALL register its own signal handlers.

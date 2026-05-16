@@ -1,7 +1,7 @@
 import crypto from 'crypto';
-import { AESGCMEngine } from './src/Infrastructure/Crypto/AESGCMEngine.js';
-import { LocalFileSystemAdapter } from './src/Infrastructure/Storage/LocalFileSystemAdapter.js';
-import { EncryptedBlob } from './src/Domain/ValueObjects/EncryptedBlob.js';
+import { AESGCMEngine } from '../src/Infrastructure/Crypto/AESGCMEngine.js';
+import { LocalFileSystemAdapter } from '../src/Infrastructure/Storage/LocalFileSystemAdapter.js';
+import { EncryptedBlob } from '../src/Domain/ValueObjects/EncryptedBlob.js';
 import path from 'path';
 import os from 'os';
 import { promises as fs } from 'fs';

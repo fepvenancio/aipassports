@@ -21,7 +21,7 @@ export class CloudflareR2Adapter extends ISyncProvider {
    */
   constructor() {
     super();
-    
+
     const accountId = process.env.R2_ACCOUNT_ID;
     const accessKeyId = process.env.R2_ACCESS_KEY_ID;
     const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
@@ -87,33 +87,46 @@ export class CloudflareR2Adapter extends ISyncProvider {
 
       return new EncryptedBlob(ciphertext, nonce, tag);
     } catch (error) {
-      console.error("[R2_PULL_ERROR]", error.message);
-      if (error.name === "NoSuchKey") {
+      // Handle both AWS SDK error formats
+      const errorCode = error.Code ?? error.name;
+      if (errorCode === 'NoSuchKey' || errorCode === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
         throw new Error(`INFRA_ERROR_R2_RESOURCE_NOT_FOUND: ${vaultId}`);
       }
+      console.error("[R2_PULL_ERROR]", error.message);
       throw new Error(`INFRA_ERROR_R2_DOWNLOAD_FAILED: ${error.message}`);
     }
   }
 
   /**
-   * @notice Wipes all objects from the sovereign bucket.
-   * @dev GDPR Article 17 compliance via bulk deletion.
+   * @notice Wipes all objects from the sovereign bucket (paginated for large buckets).
+   * @dev GDPR Article 17 compliance via bulk deletion with pagination.
    */
   async nuke() {
     try {
-      const listCommand = new ListObjectsV2Command({ Bucket: this.#bucketName });
-      const listResponse = await this.#client.send(listCommand);
+      let continuationToken = undefined;
 
-      if (listResponse.Contents && listResponse.Contents.length > 0) {
-        const deleteCommand = new DeleteObjectsCommand({
+      do {
+        const listCommand = new ListObjectsV2Command({
           Bucket: this.#bucketName,
-          Delete: {
-            Objects: listResponse.Contents.map((obj) => ({ Key: obj.Key })),
-          },
+          ContinuationToken: continuationToken,
         });
-        await this.#client.send(deleteCommand);
-      }
-      
+        const listResponse = await this.#client.send(listCommand);
+
+        if (listResponse.Contents && listResponse.Contents.length > 0) {
+          const deleteCommand = new DeleteObjectsCommand({
+            Bucket: this.#bucketName,
+            Delete: {
+              Objects: listResponse.Contents.map((obj) => ({ Key: obj.Key })),
+            },
+          });
+          await this.#client.send(deleteCommand);
+        }
+
+        continuationToken = listResponse.IsTruncated
+          ? listResponse.NextContinuationToken
+          : undefined;
+      } while (continuationToken);
+
       console.warn("[STORAGE] Cloudflare R2 bucket wiped.");
     } catch (error) {
       console.error("[R2_NUKE_ERROR]", error.message);

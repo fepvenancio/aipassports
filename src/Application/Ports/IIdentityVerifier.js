@@ -1,7 +1,9 @@
 /**
  * @title IIdentityVerifier Port
  * @notice Abstract interface for identity validation.
- * @dev Enforces seed-phrase-free authentication via WebAuthn/Passkey assertions.
+ * @dev Verifies JWT assertions derived from WebAuthn/Passkey authentication ceremonies.
+ *      The Passkey ceremony itself happens client-side; this port validates the resulting
+ *      signed JWT token server-side.
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -10,9 +12,9 @@
 
 export class IIdentityVerifier {
   /**
-   * @notice Verifies a cryptographic assertion (e.g., JWT).
-   * @param {string} token - The signed assertion.
-   * @param {string|Buffer} publicKey - The public key to verify against.
+   * @notice Verifies a JWT assertion signature and expiration.
+   * @param {string} token - The signed JWT assertion.
+   * @param {string|Buffer} publicKey - The PEM-encoded public key to verify against.
    * @returns {Promise<boolean>}
    */
   async verifyAssertion(token, publicKey) { throw new Error('NOT_IMPLEMENTED'); }

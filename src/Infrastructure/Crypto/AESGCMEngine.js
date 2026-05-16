@@ -14,6 +14,7 @@ import { EncryptedBlob } from '../../Domain/ValueObjects/EncryptedBlob.js';
 
 export class AESGCMEngine extends ICryptoEngine {
   #masterKey;
+  #destroyed;
 
   /**
    * @param {Buffer} masterKey - 32-byte (256-bit) cryptographically strong Buffer.
@@ -22,6 +23,7 @@ export class AESGCMEngine extends ICryptoEngine {
     super();
     this._validateKey(masterKey);
     this.#masterKey = masterKey;
+    this.#destroyed = false;
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -35,24 +37,22 @@ export class AESGCMEngine extends ICryptoEngine {
    * @returns {Promise<EncryptedBlob>}
    */
   async encrypt(plaintext, dek) {
+    this._assertNotDestroyed();
+
     if (typeof plaintext !== 'string') {
       throw new Error('INFRA_ERROR_CRYPTO_INVALID_PLAINTEXT_TYPE');
     }
 
     const key = dek ?? this.#masterKey;
+    if (dek !== undefined) {
+      this._validateKey(dek);
+    }
 
     try {
-      // 1. Derive unique 12-byte initialization vector (nonce)
       const iv = crypto.randomBytes(12);
-
-      // 2. Initialize cipher with GCM mode
       const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-      
-      // 3. Perform encryption
       let ciphertext = cipher.update(plaintext, 'utf8', 'base64');
       ciphertext += cipher.final('base64');
-      
-      // 4. Extract 16-byte authentication tag
       const tag = cipher.getAuthTag().toString('base64');
 
       return new EncryptedBlob(
@@ -72,22 +72,23 @@ export class AESGCMEngine extends ICryptoEngine {
    * @returns {Promise<string>}
    */
   async decrypt(blob, dek) {
+    this._assertNotDestroyed();
+
     const key = dek ?? this.#masterKey;
+    if (dek !== undefined) {
+      this._validateKey(dek);
+    }
 
     try {
       const iv = Buffer.from(blob.nonce, 'base64');
       const tag = Buffer.from(blob.tag, 'base64');
 
-      // 1. Initialize decipher
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-      
-      // 2. Set expected authentication tag
       decipher.setAuthTag(tag);
-      
-      // 3. Perform decryption and verification
+
       let plaintext = decipher.update(blob.ciphertext, 'base64', 'utf8');
       plaintext += decipher.final('utf8');
-      
+
       return plaintext;
     } catch (error) {
       throw new Error('INFRA_ERROR_DECRYPTION_FAILED_OR_TAMPERED');
@@ -103,11 +104,15 @@ export class AESGCMEngine extends ICryptoEngine {
    * @dev Implements Right to Forgotten by zero-filling the underlying buffer.
    */
   async nuke() {
+    if (this.#destroyed) {
+      console.warn('[SECURITY] Master key already shredded. No-op.');
+      return;
+    }
     if (this.#masterKey) {
-      // Overwrite memory with zeros before release
       this.#masterKey.fill(0);
       this.#masterKey = null;
     }
+    this.#destroyed = true;
     console.warn('[SECURITY] Master key shredded from volatile memory.');
   }
 
@@ -118,6 +123,12 @@ export class AESGCMEngine extends ICryptoEngine {
   _validateKey(key) {
     if (!Buffer.isBuffer(key) || key.length !== 32) {
       throw new Error('INFRA_ERROR_INVALID_MASTER_KEY_SIZE_EXPECTED_32_BYTES');
+    }
+  }
+
+  _assertNotDestroyed() {
+    if (this.#destroyed || this.#masterKey === null) {
+      throw new Error('INFRA_ERROR_KEY_DESTROYED');
     }
   }
 }

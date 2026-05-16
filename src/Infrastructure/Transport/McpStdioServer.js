@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { 
-  ListToolsRequestSchema, 
+import {
+  ListToolsRequestSchema,
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -9,6 +9,7 @@ import {
   McpError
 } from "@modelcontextprotocol/sdk/types.js";
 import { Vault } from "../../Domain/Aggregates/Vault.js";
+import { ExecuteToolUseCase } from "../../Application/UseCases/ExecuteToolUseCase.js";
 
 /**
  * @title McpStdioServer
@@ -23,6 +24,7 @@ import { Vault } from "../../Domain/Aggregates/Vault.js";
 export class McpStdioServer {
   #server;
   #vault;
+  #executeToolUseCase;
 
   /**
    * @param {Vault} vault - The hydrated domain aggregate.
@@ -31,8 +33,10 @@ export class McpStdioServer {
     if (!(vault instanceof Vault)) {
       throw new Error('INFRA_ERROR_TRANSPORT_INVALID_VAULT_INSTANCE');
     }
-    
+
     this.#vault = vault;
+    this.#executeToolUseCase = new ExecuteToolUseCase();
+
     this.#server = new Server(
       {
         name: "ai-passport-server",
@@ -47,7 +51,6 @@ export class McpStdioServer {
     );
 
     this._setupHandlers();
-    this._setupErrorHandling();
   }
 
   /* //////////////////////////////////////////////////////////////
@@ -66,7 +69,7 @@ export class McpStdioServer {
       try {
         return {
           tools: this.#vault.skills.map(skill => ({
-            name: skill.id, // Using ID as the unique identifier for tools
+            name: skill.id,
             description: skill.description,
             inputSchema: skill.schema
           }))
@@ -77,27 +80,25 @@ export class McpStdioServer {
     });
 
     /**
-     * @notice Handles tool execution requests.
+     * @notice Handles tool execution requests via ExecuteToolUseCase.
      */
     this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
-      const skill = this.#vault.skills.find(s => s.id === name);
-
-      if (!skill) {
-        throw new McpError(ErrorCode.MethodNotFound, `Skill not found: ${name}`);
-      }
 
       try {
-        // Here we would normally invoke ExecuteToolUseCase
+        const result = await this.#executeToolUseCase.execute(this.#vault, name, args);
         return {
           content: [
-            { 
-              type: "text", 
-              text: `SUCCESS: Invoked ${skill.name}. Logic execution would happen here in a live TEE.` 
+            {
+              type: "text",
+              text: `SUCCESS: Invoked ${result.skillName}. Execution triggered.`
             }
           ]
         };
       } catch (error) {
+        if (error.message === 'USE_CASE_ERROR_SKILL_NOT_FOUND') {
+          throw new McpError(ErrorCode.MethodNotFound, `Skill not found: ${name}`);
+        }
         return {
           content: [{ type: "text", text: `EXECUTION_ERROR: ${error.message}` }],
           isError: true
@@ -131,42 +132,32 @@ export class McpStdioServer {
      * @notice Reads a specific wiki resource.
      */
     this.#server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      const uri = new URL(request.params.uri);
-      if (uri.protocol !== 'wiki:') {
-        throw new McpError(ErrorCode.InvalidParams, "Unsupported protocol");
+      try {
+        const uri = new URL(request.params.uri);
+        if (uri.protocol !== 'wiki:') {
+          throw new McpError(ErrorCode.InvalidParams, "Unsupported protocol");
+        }
+
+        const slug = uri.hostname || uri.pathname.replace(/^\/\//, '');
+        const page = this.#vault.wikiPages.find(p => p.slug === slug);
+
+        if (!page) {
+          throw new McpError(ErrorCode.ResourceNotFound, `Wiki page not found: ${slug}`);
+        }
+
+        return {
+          contents: [
+            {
+              uri: request.params.uri,
+              mimeType: "text/markdown",
+              text: page.content
+            }
+          ]
+        };
+      } catch (error) {
+        if (error instanceof McpError) throw error;
+        throw new McpError(ErrorCode.InternalError, error.message);
       }
-
-      const slug = uri.hostname || uri.pathname.replace(/^\/\//, '');
-      const page = this.#vault.wikiPages.find(p => p.slug === slug);
-
-      if (!page) {
-        throw new McpError(ErrorCode.ResourceNotFound, `Wiki page not found: ${slug}`);
-      }
-
-      return {
-        contents: [
-          {
-            uri: request.params.uri,
-            mimeType: "text/markdown",
-            text: page.content
-          }
-        ]
-      };
-    });
-  }
-
-  /* //////////////////////////////////////////////////////////////
-                          ERROR HANDLING
-  //////////////////////////////////////////////////////////////*/
-
-  _setupErrorHandling() {
-    this.#server.onerror = (error) => {
-      console.error("[MCP_SERVER_ERROR]", error);
-    };
-
-    process.on('SIGINT', async () => {
-      await this.#server.close();
-      process.exit(0);
     });
   }
 
@@ -186,5 +177,12 @@ export class McpStdioServer {
       console.error("FATAL: Failed to start MCP Server", error);
       process.exit(1);
     }
+  }
+
+  /**
+   * @notice Closes the MCP server.
+   */
+  async close() {
+    await this.#server.close();
   }
 }

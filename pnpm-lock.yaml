@@ -14,12 +14,16 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
-      '@types/express':
-        specifier: ^5.0.6
-        version: 5.0.6
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       express:
         specifier: ^5.2.1
         version: 5.2.1
+    devDependencies:
+      '@types/express':
+        specifier: ^5.0.6
+        version: 5.0.6
 
 packages:
 

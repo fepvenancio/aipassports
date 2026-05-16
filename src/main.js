@@ -6,68 +6,78 @@ import { McpStdioServer } from './Infrastructure/Transport/McpStdioServer.js';
 import { McpSseServer } from './Infrastructure/Transport/McpSseServer.js';
 import { JwtAssertionVerifier } from './Infrastructure/Crypto/JwtAssertionVerifier.js';
 import { AESGCMEngine } from './Infrastructure/Crypto/AESGCMEngine.js';
+import { VaultRepository } from './Infrastructure/Storage/VaultRepository.js';
+import { LocalFileSystemAdapter } from './Infrastructure/Storage/LocalFileSystemAdapter.js';
+import { SyncService } from './Application/Services/SyncService.js';
 
 /**
  * @title Main Entry Point
- * @notice Boots the local alpha AI Passport server.
+ * @notice Boots the AI Passport server.
+ * @dev SSE mode uses per-session vault hydration; stdio mode uses a default vault.
  */
 
+let sseServer = null;
+let syncService = null;
+
 async function main() {
+  const transportArg = process.argv.find(arg => arg.startsWith('--transport='));
+  const transport = transportArg ? transportArg.split('=')[1] : 'stdio';
+
   /* //////////////////////////////////////////////////////////////
-                          MOCK HYDRATION
+                    SHARED INFRASTRUCTURE
   //////////////////////////////////////////////////////////////*/
-  
-  // In a real scenario, this would be loaded via SyncVaultUseCase
-  const mockSkill = new Skill(
-    "calculate-risk",
-    "Calculate Risk",
-    "Analyzes the security risk of a specific smart contract address.",
-    {
-      type: "object",
-      properties: {
-        address: { type: "string", description: "The Ethereum address to audit." }
-      },
-      required: ["address"]
-    }
-  );
 
-  const mockWiki = new WikiPage(
-    "index",
-    "# Sovereign AI Passport Wiki\n\n## Core Principles\n- Total Portability\n- Zero Trust Architecture\n- Hardware-Enforced Privacy",
-    { confidence: 1.0 }
-  );
+  const masterKey = crypto.randomBytes(32);
+  const cryptoEngine = new AESGCMEngine(masterKey);
 
-  const vault = new Vault("user-0xdeadbeef", [mockSkill], [mockWiki]);
+  const storage = process.env.R2_ACCOUNT_ID
+    ? new (await import('./Infrastructure/Storage/CloudflareR2Adapter.js')).CloudflareR2Adapter()
+    : new LocalFileSystemAdapter();
+
+  syncService = new SyncService(storage, cryptoEngine);
+  const vaultRepository = new VaultRepository(storage, cryptoEngine);
+
+  /* //////////////////////////////////////////////////////////////
+                        COORDINATED SHUTDOWN
+  //////////////////////////////////////////////////////////////*/
+
+  const shutdown = async (signal) => {
+    console.error(`\n[SHUTDOWN] Received ${signal}, flushing state...`);
+    if (syncService) await syncService.destroy();
+    if (sseServer) sseServer.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
   /* //////////////////////////////////////////////////////////////
                           START TRANSPORT
   //////////////////////////////////////////////////////////////*/
 
-  const transportArg = process.argv.find(arg => arg.startsWith('--transport='));
-  const transport = transportArg ? transportArg.split('=')[1] : 'stdio';
-
   if (transport === 'sse') {
     const verifier = new JwtAssertionVerifier();
-    const masterKey = crypto.randomBytes(32);
-    const cryptoEngine = new AESGCMEngine(masterKey);
-
-    // Determine which storage to use based on env
-    const { CloudflareR2Adapter } = await import('./Infrastructure/Storage/CloudflareR2Adapter.js');
-    const { LocalFileSystemAdapter } = await import('./Infrastructure/Storage/LocalFileSystemAdapter.js');
-    const { SyncService } = await import('./Application/Services/SyncService.js');
     const { ZdrProxyClient } = await import('./Infrastructure/Transport/ZdrProxyClient.js');
-
-    const storage = process.env.R2_ACCOUNT_ID 
-      ? new CloudflareR2Adapter()
-      : new LocalFileSystemAdapter();
-
-    const syncService = new SyncService(storage, cryptoEngine);
     const proxyClient = new ZdrProxyClient();
-    const sseServer = new McpSseServer(vault, verifier, syncService, proxyClient);
-    
-    console.error("🚀 Project Aegis: Booting SSE Gateway...");
+
+    sseServer = new McpSseServer(vaultRepository, verifier, syncService, proxyClient, {
+      corsOrigins: process.env.CORS_ORIGINS?.split(',') ?? [],
+    });
+
+    console.error("🚀 Project Aegis: Booting Streamable HTTP Gateway...");
     await sseServer.start(8080);
   } else {
+    // Stdio: single-user mode, load or create a default vault
+    const ownerId = process.env.OWNER_ID ?? 'local-user';
+    let vault;
+
+    try {
+      vault = await vaultRepository.load(ownerId);
+      console.error(`✅ Loaded vault for ${ownerId}`);
+    } catch {
+      vault = new Vault(ownerId);
+      console.error(`✅ Created new vault for ${ownerId}`);
+    }
+
     const stdioServer = new McpStdioServer(vault);
     console.error("🚀 Project Aegis: Booting Stdio Server...");
     await stdioServer.start();
