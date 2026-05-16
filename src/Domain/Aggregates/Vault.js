@@ -60,12 +60,12 @@ export class Vault {
   }
 
   /* //////////////////////////////////////////////////////////////
-                          BUSINESS LOGIC
+                          SKILL MANAGEMENT
   //////////////////////////////////////////////////////////////*/
 
   /**
    * @notice Adds a new skill to the vault.
-   * @param {Skill} skill 
+   * @param {Skill} skill
    */
   addSkill(skill) {
     if (this.#skills.find(s => s.id === skill.id)) {
@@ -75,11 +75,66 @@ export class Vault {
   }
 
   /**
+   * @notice Removes a skill from the vault by ID.
+   * @param {string} skillId
+   * @returns {boolean} True if removed, false if not found.
+   */
+  removeSkill(skillId) {
+    const index = this.#skills.findIndex(s => s.id === skillId);
+    if (index === -1) return false;
+    this.#skills.splice(index, 1);
+    return true;
+  }
+
+  /**
+   * @notice Finds a skill by ID.
+   * @param {string} skillId
+   * @returns {Skill|undefined}
+   */
+  getSkill(skillId) {
+    return this.#skills.find(s => s.id === skillId);
+  }
+
+  /* //////////////////////////////////////////////////////////////
+                          WIKI MANAGEMENT
+  //////////////////////////////////////////////////////////////*/
+
+  /**
+   * @notice Creates a new wiki page. Rejects if slug already exists.
+   * @param {string} slug
+   * @param {string} content
+   * @param {object} [metadata]
+   */
+  createWikiPage(slug, content, metadata = {}) {
+    if (this.#wikiPages.find(p => p.slug === slug)) {
+      throw new Error('DOMAIN_ERROR_WIKI_PAGE_ALREADY_EXISTS');
+    }
+    this.#wikiPages.push(new WikiPage(slug, content, metadata));
+  }
+
+  /**
+   * @notice Updates an existing wiki page's content and/or metadata.
+   * @param {string} slug
+   * @param {string} content
+   * @param {object} [metadata]
+   */
+  updateWikiPage(slug, content, metadata) {
+    const page = this.#wikiPages.find(p => p.slug === slug);
+    if (!page) {
+      throw new Error('DOMAIN_ERROR_WIKI_PAGE_NOT_FOUND');
+    }
+    page.updateContent(content);
+    if (metadata !== undefined) {
+      page.updateMetadata(metadata);
+    }
+  }
+
+  /**
    * @notice Ingests a wiki page, ensuring memory consistency.
+   * Creates if new, mitigates contradiction if existing.
    * @param {WikiPage|object} page - WikiPage entity or plain object { slug, content, metadata }.
    */
   ingestWikiPage(page) {
-    // Accept both WikiPage instances and plain objects from deserialization
     const slug = page instanceof WikiPage ? page.slug : page.slug;
     const existing = this.#wikiPages.find(p => p.slug === slug);
     if (existing) {
@@ -90,13 +145,20 @@ export class Vault {
     }
   }
 
+  /**
+   * @notice Gets a wiki page by slug.
+   * @param {string} slug
+   * @returns {WikiPage|undefined}
+   */
+  getWikiPage(slug) {
+    return this.#wikiPages.find(p => p.slug === slug);
+  }
+
   _mitigateContradiction(existing, incoming) {
-    // FR-3.2: Contradiction mitigation — log anomaly and adjust confidence
     const incomingPage = incoming instanceof WikiPage ? incoming : new WikiPage(incoming.slug, incoming.content, incoming.metadata);
     const incomingConfidence = incomingPage.metadata?.confidence ?? 0.5;
     const existingConfidence = existing.metadata?.confidence ?? 1.0;
 
-    // Reduce existing confidence when a contradiction is detected
     existing.updateConfidence(existingConfidence * 0.8);
     console.log(`[CONTRADICTION] ${existing.slug}: confidence reduced to ${existingConfidence * 0.8} due to conflicting update (incoming confidence: ${incomingConfidence})`);
   }

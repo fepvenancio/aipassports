@@ -2,9 +2,13 @@ node_modules/
 .DS_Store
 .storage/
 .env
+.env.*
 dist/
 build/
 *.bak
 .planning/
-.repo-audit/frontend/
+.repo-audit/
+.ai/
+*.log
+pepper.key
 frontend/

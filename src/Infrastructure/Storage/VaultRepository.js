@@ -7,6 +7,7 @@ import { Vault } from '../../Domain/Aggregates/Vault.js';
  * @title VaultRepository
  * @notice Implements IVaultRepository with LRU cache and encrypted storage.
  * @dev Caches recently-used vaults to avoid redundant decrypt/IO cycles.
+ *      Uses per-user DEK derived from HKDF (pepper + ownerId) for persistent encryption.
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -19,21 +20,24 @@ const DEFAULT_MAX_ENTRIES = 256;
 export class VaultRepository extends IVaultRepository {
   #syncProvider;
   #cryptoEngine;
+  #keyDerivation;
   #cache;
   #maxEntries;
   #ttlMs;
 
   /**
    * @param {ISyncProvider} syncProvider - Storage adapter (R2 or local).
-   * @param {ICryptoEngine} cryptoEngine - Encryption engine.
+   * @param {ICryptoEngine} cryptoEngine - Encryption engine (master key used as fallback).
+   * @param {KeyDerivation} keyDerivation - Per-user DEK derivation. If null, encrypts with master key.
    * @param {object} [options]
    * @param {number} [options.maxEntries=256] - Maximum cached vaults.
    * @param {number} [options.ttlMs=900000] - Cache entry TTL in milliseconds (default 15min).
    */
-  constructor(syncProvider, cryptoEngine, options = {}) {
+  constructor(syncProvider, cryptoEngine, keyDerivation = null, options = {}) {
     super();
     this.#syncProvider = syncProvider;
     this.#cryptoEngine = cryptoEngine;
+    this.#keyDerivation = keyDerivation;
     this.#maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
     this.#ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     this.#cache = new Map(); // ownerId -> { vault, accessedAt }
@@ -52,7 +56,8 @@ export class VaultRepository extends IVaultRepository {
 
     try {
       const encryptedBlob = await this.#syncProvider.pull(`${ownerId}/vault.json`);
-      const decryptedData = await this.#cryptoEngine.decrypt(encryptedBlob);
+      const dek = this.#getDEK(ownerId);
+      const decryptedData = await this.#cryptoEngine.decrypt(encryptedBlob, dek);
       const data = JSON.parse(decryptedData);
       const vault = Vault.fromJSON({ ...data, ownerId });
       this.#touch(ownerId, vault);
@@ -76,7 +81,8 @@ export class VaultRepository extends IVaultRepository {
    */
   async save(ownerId, state) {
     const plaintext = JSON.stringify(state);
-    const encryptedBlob = await this.#cryptoEngine.encrypt(plaintext);
+    const dek = this.#getDEK(ownerId);
+    const encryptedBlob = await this.#cryptoEngine.encrypt(plaintext, dek);
     await this.#syncProvider.push(`${ownerId}/vault.json`, encryptedBlob);
     const vault = Vault.fromJSON({ ...state, ownerId });
     this.#touch(ownerId, vault);
@@ -108,6 +114,19 @@ export class VaultRepository extends IVaultRepository {
   /* //////////////////////////////////////////////////////////////
                             INTERNALS
   //////////////////////////////////////////////////////////////*/
+
+  /**
+   * @notice Derives a per-user DEK, or falls back to master key.
+   * @param {string} ownerId
+   * @returns {Buffer|undefined} DEK for encrypt/decrypt, or undefined to use master key.
+   */
+  #getDEK(ownerId) {
+    if (this.#keyDerivation) {
+      return this.#keyDerivation.deriveDEK(ownerId);
+    }
+    // Fallback: use crypto engine's master key (no per-user DEK)
+    return undefined;
+  }
 
   #touch(ownerId, vault) {
     // Evict oldest if at capacity

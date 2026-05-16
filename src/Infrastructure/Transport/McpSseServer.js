@@ -10,11 +10,14 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SessionManager } from "./SessionManager.js";
 import { RateLimiter } from "./RateLimiter.js";
+import { ExecuteToolUseCase } from "../../Application/UseCases/ExecuteToolUseCase.js";
+import { BuiltinTools } from "../../Application/Constants/BuiltinTools.js";
 
 /**
  * @title McpSseServer
  * @notice HTTP transport for the Sovereign AI Passport with per-session isolation.
  * @dev Each authenticated user gets their own Vault, MCP Server, and transport.
+ *      Vault persistence uses VaultRepository with per-user DEK encryption.
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -25,25 +28,22 @@ export class McpSseServer {
   #app;
   #vaultRepository;
   #verifier;
-  #syncService;
-  #proxyClient;
+  #skillExecutor;
   #sessionManager;
 
   /**
-   * @param {IVaultRepository} vaultRepository - Repository for loading/saving vaults per user.
+   * @param {IVaultRepository} vaultRepository - Repository for loading/saving vaults per user (uses DEK).
    * @param {IIdentityVerifier} verifier - Identity validation port.
-   * @param {SyncService} syncService - The sync orchestrator.
-   * @param {IOutboundProxy} proxyClient - The security firewall proxy.
+   * @param {SkillExecutor} skillExecutor - LLM-backed skill executor.
    * @param {object} [options]
    * @param {number} [options.sessionTtlMs=3600000] - Session TTL (default 1 hour).
    * @param {number} [options.maxSessions=1024] - Maximum concurrent sessions.
    * @param {string[]} [options.corsOrigins=[]] - Allowed CORS origins.
    */
-  constructor(vaultRepository, verifier, syncService, proxyClient, options = {}) {
+  constructor(vaultRepository, verifier, skillExecutor, options = {}) {
     this.#vaultRepository = vaultRepository;
     this.#verifier = verifier;
-    this.#syncService = syncService;
-    this.#proxyClient = proxyClient;
+    this.#skillExecutor = skillExecutor;
 
     this.#sessionManager = new SessionManager({
       ttlMs: options.sessionTtlMs,
@@ -85,26 +85,21 @@ export class McpSseServer {
       next();
     });
 
-    this._setupRoutes();
+    this._setupRoutes(unlockLimiter, messageLimiter);
   }
 
   /* //////////////////////////////////////////////////////////////
                           REST ROUTES
   //////////////////////////////////////////////////////////////*/
 
-  _setupRoutes() {
+  _setupRoutes(unlockLimiter, messageLimiter) {
     /**
      * @notice Identity Challenge Route.
-     * Generates a short-lived cryptographic challenge for WebAuthn.
+     * Generates a cryptographic challenge for WebAuthn/Passkey ceremonies.
      */
     this.#app.post("/auth/challenge", (req, res) => {
-      // In production, this would be stored in a temporary cache (Redis/Memcached)
-      const challenge = crypto.randomBytes(32).toString('base64');
-      res.status(200).json({
-        challenge,
-        userPublicKeyId: "mock-public-key-id",
-        timeout: 60000
-      });
+      const challenge = crypto.randomBytes(32).toString('base64url');
+      res.status(200).json({ challenge, timeout: 60000 });
     });
 
     /**
@@ -125,22 +120,26 @@ export class McpSseServer {
           return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_FAILED" });
         }
 
-        // Extract ownerId from JWT payload
+        // Extract ownerId from JWT sub claim — reject if missing
         const [, payloadB64] = token.split('.');
         let ownerId;
         try {
           const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
-          ownerId = payload.sub ?? payload.iss ?? 'unknown';
+          ownerId = payload.sub ?? payload.iss;
         } catch {
-          ownerId = 'unknown';
+          // Intentionally fall through
+        }
+
+        if (!ownerId) {
+          return res.status(401).json({ error: "INVALID_TOKEN: missing sub or iss claim" });
         }
 
         // Load or create the user's vault
         const vault = await this.#vaultRepository.load(ownerId);
         const sessionId = this.#sessionManager.create(ownerId, vault);
 
-        // Trigger immediate sync on unlock
-        this.#syncService.immediateSync(ownerId, vault.toJSON());
+        // Persist vault state on unlock
+        await this.#vaultRepository.save(ownerId, vault.toJSON());
 
         res.status(200).json({ status: "UNLOCKED", vaultId: ownerId, sessionId });
       } catch (error) {
@@ -151,7 +150,6 @@ export class McpSseServer {
 
     /**
      * @notice SSE Connection Endpoint.
-     * Creates per-session MCP server and streamable HTTP transport.
      */
     this.#app.get("/mcp/sse", async (req, res) => {
       const sessionId = req.headers['x-session-id'];
@@ -162,13 +160,13 @@ export class McpSseServer {
       }
 
       try {
-        // Create a dedicated MCP server for this session
         const mcpServer = new Server(
-          { name: "ai-passport-server", version: "1.0.0" },
+          { name: "ai-passport-server", version: "2.0.0" },
           { capabilities: { tools: {}, resources: {} } }
         );
 
-        this._registerMcpHandlers(mcpServer, session.vault);
+        const executeToolUseCase = new ExecuteToolUseCase(this.#skillExecutor);
+        this._registerMcpHandlers(mcpServer, session.vault, executeToolUseCase);
 
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => sessionId,
@@ -176,15 +174,13 @@ export class McpSseServer {
 
         await mcpServer.connect(transport);
 
-        // Store server and transport in session
         session.server = mcpServer;
         session.transport = transport;
 
-        console.error(`[SSE_SESSION_CONNECTED] owner=${session.ownerId} session=${sessionId}`);
+        console.error(`[SESSION_CONNECTED] owner=${session.ownerId}`);
 
-        // Handle connection close
         res.on('close', () => {
-          console.error(`[SSE_SESSION_DISCONNECTED] owner=${session.ownerId} session=${sessionId}`);
+          console.error(`[SESSION_DISCONNECTED] owner=${session.ownerId}`);
         });
 
         await transport.handleRequest(req, res);
@@ -198,7 +194,6 @@ export class McpSseServer {
 
     /**
      * @notice MCP Message Endpoint.
-     * Routes JSON-RPC frames to the session's dedicated server.
      */
     this.#app.post("/mcp/messages", messageLimiter.middleware(), async (req, res) => {
       const sessionId = req.headers['x-session-id'] ?? req.body?.session_id;
@@ -234,37 +229,36 @@ export class McpSseServer {
                           MCP HANDLERS
   //////////////////////////////////////////////////////////////*/
 
-  /**
-   * @notice Registers MCP request handlers for a specific session's vault.
-   * @param {Server} mcpServer - The MCP server instance.
-   * @param {Vault} vault - The user's vault aggregate.
-   */
-  _registerMcpHandlers(mcpServer, vault) {
-    mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: vault.skills.map(skill => ({
+  _registerMcpHandlers(mcpServer, vault, executeToolUseCase) {
+    mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
+      const userSkills = vault.skills.map(skill => ({
         name: skill.id,
         description: skill.description,
         inputSchema: skill.schema
-      }))
-    }));
+      }));
+      return { tools: [...BuiltinTools, ...userSkills] };
+    });
 
     mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
-      const skill = vault.skills.find(s => s.id === name);
 
-      if (!skill) {
+      try {
+        const result = await executeToolUseCase.execute(vault, name, args || {});
+
+        // Persist vault state after mutations via VaultRepository (per-user DEK)
+        if (name.startsWith('wiki/') || name.startsWith('skill/')) {
+          await this.#vaultRepository.save(vault.ownerId, vault.toJSON());
+        }
+
         return {
-          content: [{ type: "text", text: `ERROR: Skill not found: ${name}` }],
+          content: [{ type: "text", text: typeof result.result === 'string' ? result.result : JSON.stringify(result) }]
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error.message }],
           isError: true
         };
       }
-
-      return {
-        content: [{
-          type: "text",
-          text: `SUCCESS: Invoked ${skill.name}. Execution would happen in a live TEE.`
-        }]
-      };
     });
 
     mcpServer.setRequestHandler(ListResourcesRequestSchema, async () => ({
@@ -280,9 +274,7 @@ export class McpSseServer {
       try {
         const uri = new URL(request.params.uri);
         if (uri.protocol !== 'wiki:') {
-          return {
-            contents: []
-          };
+          return { contents: [] };
         }
 
         const slug = uri.hostname || uri.pathname.replace(/^\/\//, '');
@@ -309,10 +301,6 @@ export class McpSseServer {
                             LIFECYCLE
   //////////////////////////////////////////////////////////////*/
 
-  /**
-   * @notice Boots the Express server on the specified port.
-   * @param {number} port
-   */
   async start(port = 8080) {
     return new Promise((resolve) => {
       this.#app.listen(port, () => {
@@ -322,12 +310,7 @@ export class McpSseServer {
     });
   }
 
-  /**
-   * @notice Gracefully shuts down the server and all sessions.
-   */
   shutdown() {
     this.#sessionManager.shutdown();
-    unlockLimiter.destroy();
-    messageLimiter.destroy();
   }
 }

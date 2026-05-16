@@ -1,4 +1,4 @@
-# DEPLOY-002: Confidential Deployment Specification
+# DEPLOY-003: Confidential Deployment Specification
 
 The keywords "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
@@ -6,56 +6,47 @@ The keywords "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SH
 
 Project Aegis SHALL be deployed within a serverless Trusted Execution Environment (TEE) (e.g., Azure ACI with AMD SEV-SNP).
 
-## 2. Enclave Hardening
+## 2. Key Management in Production
 
-### 2.1 Memory Encryption
-- The deployment manifest MUST activate hardware-enforced memory isolation (Confidential SKU).
-- Application memory SHALL be encrypted at rest and in transit within the processor registers.
+### 2.1 Pepper Injection
+- In TEE deployment, the `PEPPER_KEY` environment variable MUST be set as a hex-encoded 32-byte value.
+- The pepper MUST be injected as a `secureValue` parameter in the deployment manifest, decryptable only within the hardware enclave after successful attestation.
+- The `~/.ai-passport/pepper.key` file MUST NOT be used in production — always use `PEPPER_KEY` env var.
 
-### 2.2 Privilege Isolation
+### 2.2 Crypto-Shredding
+- Deleting the `PEPPER_KEY` (or revoking the secureValue) SHALL render all user data cryptographically unrecoverable.
+- `AESGCMEngine.nuke()` zero-fills the in-memory master key as defense-in-depth.
+
+## 3. Environment Variables
+
+| Variable | Mode | Description |
+|---|---|---|
+| `PEPPER_KEY` | All | Hex-encoded 32-byte server pepper (required for persistence across restarts) |
+| `LLM_ENDPOINT_URL` | All | LLM API endpoint (must be ZDR-verified) |
+| `LLM_MODEL` | All | Model name (default: `gpt-4o-mini`) |
+| `LLM_MAX_TOKENS` | All | Max response tokens (default: `1024`) |
+| `OWNER_ID` | stdio | Vault owner for local mode (default: `local-user`) |
+| `R2_ACCOUNT_ID` | SSE | Cloudflare R2 account ID |
+| `R2_ACCESS_KEY_ID` | SSE | R2 access key |
+| `R2_SECRET_ACCESS_KEY` | SSE | R2 secret key |
+| `R2_BUCKET_NAME` | SSE | R2 bucket name |
+| `CORS_ORIGINS` | SSE | Comma-separated allowed origins |
+| `LOCAL_VAULT_PATH` | stdio | Override local storage path |
+
+## 4. Container Hardening
+
+### 4.1 Privilege Isolation
 - The container MUST run as a non-root user (`aegisuser`).
-- Root privileges MUST be dropped immediately after the container boot sequence.
-- The data directory MUST be at `/home/aegisuser/.ai-passport` with correct ownership (`aegisuser:aegisgroup`).
+- The data directory MUST be at `/home/aegisuser/.ai-passport` with correct ownership.
 
-### 2.3 Request Body Limits
-- Express MUST enforce a maximum request body size of 100KB (`express.json({ limit: '100kb' })`).
+### 4.2 Security Headers
+- `X-Content-Type-Options: nosniff` MUST be set on all responses.
+- `X-Frame-Options: DENY` MUST be set on all responses.
+- `Cache-Control: no-store` MUST be set on all responses.
+- Request body size MUST be limited to 100KB.
 
-### 2.4 Security Headers
-- The application MUST set `X-Content-Type-Options: nosniff` on all responses.
-- The application MUST set `X-Frame-Options: DENY` on all responses.
-- The application MUST set `Cache-Control: no-store` on all responses.
-
-## 3. Remote Attestation
-
-### 3.1 TCB Measurement
-- Before deployment, a measurement of the Trusted Computing Base (TCB) MUST be performed.
-- The TCB measurement SHALL include hashes of the container images and the application source code.
-
-### 3.2 CCE Policy
-- A Confidential Computing Enforcement (CCE) policy MUST be generated and embedded in the deployment manifest.
-- The CCE policy SHALL prevent the container from booting if the runtime measurement mismatches the pre-calculated hash.
-
-## 4. Secret Management
-
-- Credentials (e.g., R2 API keys) MUST NOT be stored in plaintext in the image or compose file.
-- Secrets MUST be injected as `secureValue` parameters in the deployment manifest, decryptable only within the hardware enclave after successful attestation.
-- The `generate-policy.sh` script MUST clean up any `.bak` files created during policy injection.
-
-## 5. Transport Modes
-
-### 5.1 Stdio Mode (Local Alpha)
-- The application SHALL accept `--transport=stdio` to run as a local JSON-RPC 2.0 server over stdin/stdout.
-- No authentication is required in stdio mode (assumed local trust).
-- Vault data MUST be loaded from `LOCAL_VAULT_PATH` or `~/.ai-passport`.
-
-### 5.2 Streamable HTTP Mode (Cloud Deployment)
-- The application SHALL accept `--transport=sse` to run as an HTTP server with Streamable HTTP transport.
-- Port SHALL default to 8080.
-- All SSE endpoints except `/health` and `/auth/challenge` MUST require authentication.
-- Sessions MUST be managed by `SessionManager` with TTL-based expiry and periodic cleanup.
-
-## 6. Graceful Shutdown
+## 5. Graceful Shutdown
 
 - The application MUST register coordinated SIGTERM and SIGINT handlers in `main.js`.
-- Shutdown sequence MUST be: flush SyncService → destroy SyncService → shutdown SessionManager → close servers → exit.
+- Shutdown sequence: `SyncService.flush()` → `SyncService.destroy()` → `SessionManager.shutdown()` → `McpSseServer.shutdown()` → exit.
 - No individual component SHALL register its own signal handlers.

@@ -29,8 +29,24 @@ export class WikiPage {
   get metadata() { return this.#metadata; }
 
   /**
+   * @notice Updates page content.
+   * @param {string} newContent
+   */
+  updateContent(newContent) {
+    this.#content = newContent;
+  }
+
+  /**
+   * @notice Replaces page metadata.
+   * @param {object} newMetadata
+   */
+  updateMetadata(newMetadata) {
+    this.#metadata = newMetadata;
+  }
+
+  /**
    * @notice Updates page confidence based on contradiction analysis.
-   * @param {number} newConfidence 
+   * @param {number} newConfidence
    */
   updateConfidence(newConfidence) {
     this.#metadata.confidence = newConfidence;

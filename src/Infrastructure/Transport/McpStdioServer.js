@@ -10,11 +10,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { Vault } from "../../Domain/Aggregates/Vault.js";
 import { ExecuteToolUseCase } from "../../Application/UseCases/ExecuteToolUseCase.js";
+import { BuiltinTools } from "../../Application/Constants/BuiltinTools.js";
 
 /**
  * @title McpStdioServer
- * @notice Production-grade MCP translator for the Sovereign AI Passport.
- * @dev Bridges the VaultAggregate to the Antigravity Host over JSON-RPC 2.0 stdio.
+ * @notice MCP translator for the Sovereign AI Passport over stdio.
+ * @dev Single-user mode. Supports skill execution, wiki management, and vault persistence.
  */
 
 /* //////////////////////////////////////////////////////////////
@@ -24,80 +25,68 @@ import { ExecuteToolUseCase } from "../../Application/UseCases/ExecuteToolUseCas
 export class McpStdioServer {
   #server;
   #vault;
+  #vaultRepository;
   #executeToolUseCase;
 
   /**
    * @param {Vault} vault - The hydrated domain aggregate.
+   * @param {IVaultRepository} vaultRepository - Repository for persisting vault mutations.
+   * @param {SkillExecutor|null} skillExecutor - LLM-backed skill executor (null for local-only).
    */
-  constructor(vault) {
+  constructor(vault, vaultRepository, skillExecutor = null) {
     if (!(vault instanceof Vault)) {
       throw new Error('INFRA_ERROR_TRANSPORT_INVALID_VAULT_INSTANCE');
     }
 
     this.#vault = vault;
-    this.#executeToolUseCase = new ExecuteToolUseCase();
+    this.#vaultRepository = vaultRepository;
+    this.#executeToolUseCase = new ExecuteToolUseCase(skillExecutor);
 
     this.#server = new Server(
-      {
-        name: "ai-passport-server",
-        version: "1.0.0",
-      },
-      {
-        capabilities: {
-          tools: {},
-          resources: {},
-        },
-      }
+      { name: "ai-passport-server", version: "2.0.0" },
+      { capabilities: { tools: {}, resources: {} } }
     );
 
     this._setupHandlers();
   }
 
-  /* //////////////////////////////////////////////////////////////
-                            TOOL HANDLERS
-  //////////////////////////////////////////////////////////////*/
-
-  /**
-   * @notice Initializes request handlers for tools and resources.
-   */
   _setupHandlers() {
     /**
-     * @notice FR-1.3: Progressive Disclosure.
-     * Maps internal Skills to MCP Tools metadata.
+     * List tools: built-in management tools + user-defined skills from vault.
      */
     this.#server.setRequestHandler(ListToolsRequestSchema, async () => {
-      try {
-        return {
-          tools: this.#vault.skills.map(skill => ({
-            name: skill.id,
-            description: skill.description,
-            inputSchema: skill.schema
-          }))
-        };
-      } catch (error) {
-        throw new McpError(ErrorCode.InternalError, "Failed to list tools");
-      }
+      const userSkills = this.#vault.skills.map(skill => ({
+        name: skill.id,
+        description: skill.description,
+        inputSchema: skill.schema
+      }));
+
+      return { tools: [...BuiltinTools, ...userSkills] };
     });
 
     /**
-     * @notice Handles tool execution requests via ExecuteToolUseCase.
+     * Call tool: route to ExecuteToolUseCase, persist mutations.
      */
     this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
       try {
-        const result = await this.#executeToolUseCase.execute(this.#vault, name, args);
+        const result = await this.#executeToolUseCase.execute(this.#vault, name, args || {});
+
+        // Persist vault state after mutations via VaultRepository (uses per-user DEK)
+        if (name.startsWith('wiki/') || name.startsWith('skill/')) {
+          await this.#vaultRepository.save(this.#vault.ownerId, this.#vault.toJSON());
+        }
+
         return {
-          content: [
-            {
-              type: "text",
-              text: `SUCCESS: Invoked ${result.skillName}. Execution triggered.`
-            }
-          ]
+          content: [{ type: "text", text: typeof result.result === 'string' ? result.result : JSON.stringify(result) }]
         };
       } catch (error) {
-        if (error.message === 'USE_CASE_ERROR_SKILL_NOT_FOUND') {
-          throw new McpError(ErrorCode.MethodNotFound, `Skill not found: ${name}`);
+        if (error.message.startsWith('USE_CASE_ERROR')) {
+          return {
+            content: [{ type: "text", text: error.message }],
+            isError: true
+          };
         }
         return {
           content: [{ type: "text", text: `EXECUTION_ERROR: ${error.message}` }],
@@ -106,30 +95,22 @@ export class McpStdioServer {
       }
     });
 
-    /* //////////////////////////////////////////////////////////////
-                          RESOURCE HANDLERS
-    //////////////////////////////////////////////////////////////*/
-
     /**
-     * @notice Maps internal Wiki nodes to MCP Resources.
+     * List resources: wiki pages.
      */
     this.#server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      try {
-        return {
-          resources: this.#vault.wikiPages.map(page => ({
-            uri: `wiki://${page.slug}`,
-            name: page.slug,
-            mimeType: "text/markdown",
-            description: `Sovereign knowledge entry: ${page.slug}`
-          }))
-        };
-      } catch (error) {
-        throw new McpError(ErrorCode.InternalError, "Failed to list resources");
-      }
+      return {
+        resources: this.#vault.wikiPages.map(page => ({
+          uri: `wiki://${page.slug}`,
+          name: page.slug,
+          mimeType: "text/markdown",
+          description: `Sovereign knowledge entry: ${page.slug}`
+        }))
+      };
     });
 
     /**
-     * @notice Reads a specific wiki resource.
+     * Read resource: wiki page content.
      */
     this.#server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       try {
@@ -146,13 +127,11 @@ export class McpStdioServer {
         }
 
         return {
-          contents: [
-            {
-              uri: request.params.uri,
-              mimeType: "text/markdown",
-              text: page.content
-            }
-          ]
+          contents: [{
+            uri: request.params.uri,
+            mimeType: "text/markdown",
+            text: page.content
+          }]
         };
       } catch (error) {
         if (error instanceof McpError) throw error;
@@ -160,10 +139,6 @@ export class McpStdioServer {
       }
     });
   }
-
-  /* //////////////////////////////////////////////////////////////
-                            LIFECYCLE
-  //////////////////////////////////////////////////////////////*/
 
   /**
    * @notice Starts the server using stdio transport.
