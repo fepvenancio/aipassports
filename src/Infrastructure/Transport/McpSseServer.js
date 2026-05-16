@@ -57,6 +57,7 @@ export class McpSseServer {
     const messageLimiter = new RateLimiter({ maxRequests: 100, windowMs: 60_000 });
 
     this.#app = express();
+    this.#app.set('trust proxy', 1);
     this.#app.use(express.json({ limit: '100kb' }));
 
     // CORS
@@ -120,18 +121,13 @@ export class McpSseServer {
           return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_FAILED" });
         }
 
-        // Extract ownerId from JWT sub claim — reject if missing
-        const [, payloadB64] = token.split('.');
-        let ownerId;
-        try {
-          const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
-          ownerId = payload.sub ?? payload.iss;
-        } catch {
-          // Intentionally fall through
-        }
+        // Generate ownerId securely from the public key hash as per Domain invariants
+        // (This prevents an attacker from supplying an arbitrary JWT payload
+        //  while using their own public key to pass signature verification)
+        const ownerId = crypto.createHash('sha256').update(publicKey).digest('hex');
 
         if (!ownerId) {
-          return res.status(401).json({ error: "INVALID_TOKEN: missing sub or iss claim" });
+          return res.status(401).json({ error: "INVALID_TOKEN: could not derive identity from public key" });
         }
 
         // Load or create the user's vault

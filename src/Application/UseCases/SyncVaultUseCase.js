@@ -14,14 +14,17 @@ import { WikiPage } from '../../Domain/Entities/WikiPage.js';
 export class SyncVaultUseCase {
   #cryptoEngine;
   #syncProvider;
+  #keyDerivation;
 
   /**
    * @param {ICryptoEngine} cryptoEngine 
    * @param {ISyncProvider} syncProvider 
+   * @param {KeyDerivation} [keyDerivation]
    */
-  constructor(cryptoEngine, syncProvider) {
+  constructor(cryptoEngine, syncProvider, keyDerivation = null) {
     this.#cryptoEngine = cryptoEngine;
     this.#syncProvider = syncProvider;
+    this.#keyDerivation = keyDerivation;
   }
 
   /**
@@ -39,7 +42,8 @@ export class SyncVaultUseCase {
       /* //////////////////////////////////////////////////////////////
                                 DECRYPT DATA
       //////////////////////////////////////////////////////////////*/
-      const decryptedData = await this.#cryptoEngine.decrypt(encryptedBlob);
+      const dek = this.#keyDerivation ? this.#keyDerivation.deriveDEK(ownerId) : undefined;
+      const decryptedData = await this.#cryptoEngine.decrypt(encryptedBlob, dek);
       const data = JSON.parse(decryptedData);
 
       /* //////////////////////////////////////////////////////////////

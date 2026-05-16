@@ -106,7 +106,10 @@ export class LocalFileSystemAdapter extends ISyncProvider {
    */
   _resolvePath(key) {
     const resolved = path.resolve(this.#basePath, key);
-    if (!resolved.startsWith(path.resolve(this.#basePath))) {
+    const expectedPrefix = path.resolve(this.#basePath);
+    
+    // Ensure it either perfectly matches the directory or is securely nested inside it.
+    if (!resolved.startsWith(expectedPrefix + path.sep) && resolved !== expectedPrefix) {
       throw new Error('SECURITY_ERROR_DIRECTORY_TRAVERSAL_DETECTED');
     }
     return resolved;
