@@ -79,25 +79,6 @@ export class McpSseServer {
   }
 
   /* //////////////////////////////////////////////////////////////
-                        AUTH MIDDLEWARE
-  //////////////////////////////////////////////////////////////*/
-
-  /**
-   * @notice Express middleware enforcing identity verification on protected routes.
-   * @dev Rejects requests that lack a valid session with authentication.
-   */
-  _requireAuth(req, res, next) {
-    const sessionId = req.headers['x-session-id'];
-    const session = this.#sessions.get(sessionId);
-
-    if (!sessionId || !session || !session.authenticated) {
-      return res.status(401).json({ error: "UNAUTHORIZED_IDENTITY_ASSERTION_REQUIRED" });
-    }
-
-    next();
-  }
-
-  /* //////////////////////////////////////////////////////////////
                           REST ROUTES
   //////////////////////////////////////////////////////////////*/
 

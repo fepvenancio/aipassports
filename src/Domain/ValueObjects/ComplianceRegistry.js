@@ -49,24 +49,10 @@ export class ComplianceRegistry {
    */
   static getPolicy(url) {
     try {
-      const host = new URL(url).hostname;
-      // Exact host match only — no substring matching to prevent bypass
-      if (host in REGISTRY) {
-        return REGISTRY[host];
-      }
-      // Fallback: check path-based keys against full URL origin + path prefix
-      for (const key in REGISTRY) {
-        const policyUrl = `https://${key}`;
-        try {
-          const policyOrigin = new URL(policyUrl).origin;
-          if (url.startsWith(policyOrigin)) {
-            return REGISTRY[key];
-          }
-        } catch {
-          // Skip malformed keys
-        }
-      }
-      return null;
+      // Exact hostname match only — prevents substring bypass attacks
+      // (e.g., https://api.anthropic.com.evil.com must NOT match)
+      const hostname = new URL(url).hostname;
+      return REGISTRY[hostname] ?? null;
     } catch {
       return null;
     }
