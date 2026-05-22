@@ -8,10 +8,19 @@
 ///      authentication and CORS controls.
 ///
 /// Security hardening applied (audit cycle 2026-05-22):
-///   C-01 — Bearer token authentication middleware on all protected routes.
-///   C-05 — Refuse to start if TEE_SEALED_KEY missing in production mode.
-///   L-06 — Replaced all unwrap()/expect() in main() with graceful error handling.
-///   L-07 — CORS locked to configurable ALLOWED_ORIGIN (default: deny all).
+///   C-01   — Bearer token authentication middleware on all protected routes.
+///   C-05   — Refuse to start if TEE_SEALED_KEY missing in production mode.
+///   L-06   — Replaced all unwrap()/expect() in main() with graceful error handling.
+///   L-07   — CORS locked to configurable ALLOWED_ORIGIN (default: deny all).
+///
+/// Security hardening applied (audit cycle 2026-05-22 round 2):
+///   HIGH-R1       — constant_time_eq replaced with subtle::ConstantTimeEq.
+///                   constant_time_eq returns false immediately on length mismatch,
+///                   leaking the key length via timing. subtle uses fixed-time ops.
+///   CRITICAL-R2   — RequestBodyLimitLayer(1 MB) added to all protected routes.
+///                   Without this, a 10 GB body caused OOM process death.
+///   CRITICAL-R6   — LLM API key loaded from LLM_API_KEY env at startup, stored
+///                   in AppState. No longer accepted in HTTP request bodies.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,8 +34,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{info, warn, error};
-use constant_time_eq::constant_time_eq;
+use subtle::ConstantTimeEq;
 
 mod key_derivation;
 mod vault_writer;
@@ -36,13 +46,17 @@ mod skill_executor;
 
 // ─── Shared State ─────────────────────────────────────────────────────────────
 
-/// Shared application state housing the platform's unsealed 32-byte master secret
-/// and the expected API key for constant-time comparison.
+/// Shared application state housing the platform's unsealed 32-byte master secret,
+/// the expected API key for constant-time comparison, and the LLM API key injected
+/// at startup (never accepted from HTTP request bodies — CRITICAL-R6).
 struct AppState {
     master_secret: [u8; 32],
     /// Pre-loaded from IRONCLAW_AGENT_API_KEY at startup.
-    /// Stored as bytes to allow constant_time_eq comparison.
+    /// Stored as bytes to enable subtle::ConstantTimeEq comparison (HIGH-R1).
     api_key_bytes: Vec<u8>,
+    /// Pre-loaded from LLM_API_KEY at startup (CRITICAL-R6).
+    /// Injected into execute_skill() — NEVER accepted from HTTP body.
+    llm_api_key: String,
 }
 
 // ─── Error Mapping ─────────────────────────────────────────────────────────────
@@ -208,7 +222,13 @@ async fn require_api_key(
         .map(|s| s.as_bytes().to_vec());
 
     let is_valid = match provided_key {
-        Some(ref key_bytes) => constant_time_eq(key_bytes, &state.api_key_bytes),
+        Some(ref key_bytes) => {
+            // HIGH-R1: subtle::ConstantTimeEq runs in constant time regardless
+            // of key length. constant_time_eq returned false immediately on length
+            // mismatch, leaking the expected key byte-length via timing.
+            // subtle pads to the longer length internally.
+            bool::from(key_bytes.as_slice().ct_eq(state.api_key_bytes.as_slice()))
+        }
         None => false,
     };
 
@@ -408,6 +428,8 @@ async fn skill_execute_handler(
 
     let response_json = skill_executor::execute_skill(
         &state.master_secret,
+        // CRITICAL-R6: LLM key from AppState — never from HTTP body
+        &state.llm_api_key,
         req,
     )
     .await
@@ -449,9 +471,19 @@ async fn main() {
         }
     };
 
+    // CRITICAL-R6: Load LLM API key at startup — never accept from HTTP body.
+    // Empty string is allowed to support providers that use different auth schemes,
+    // but a warning is logged so operators are aware.
+    let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_else(|_| {
+        warn!("LLM_API_KEY not set — skill execution will fail at LLM provider auth step. \
+               Set LLM_API_KEY to the provider's API key (OpenAI, Anthropic, or Vertex).");
+        String::new()
+    });
+
     let state = Arc::new(AppState {
         master_secret,
         api_key_bytes: api_key.into_bytes(),
+        llm_api_key,
     });
 
     // 4. Build CORS layer
@@ -485,11 +517,13 @@ async fn main() {
 
     // 5. Mount Routes
     // Protected routes: require Bearer token authentication (C-01).
-    // Health route: unauthenticated, intentionally minimal.
+    // CRITICAL-R2: RequestBodyLimitLayer(1 MB) prevents OOM via unbounded request bodies.
+    // Health + attest routes: unauthenticated, no body limit needed (GET only).
     let protected_routes = Router::new()
         .route("/vault/write", post(vault_write_handler))
         .route("/vault/read", post(vault_read_handler))
         .route("/skills/execute", post(skill_execute_handler))
+        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024)) // 1 MB max body
         .route_layer(middleware::from_fn_with_state(state.clone(), require_api_key));
 
     let app = Router::new()

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import * as nearRpc from '../api/nearRpc';
 import * as agent from '../api/gateway';
 import * as wallet from '../near/wallet';
@@ -32,6 +32,14 @@ export interface WikiState {
 // Encapsulates all async state machine logic for wiki page CRUD.
 // Reads: NEAR RPC (no auth) → TEE agent decryption
 // Writes: TEE agent encryption → Walrus upload → NEAR wallet transaction
+//
+// Security hardening applied (audit cycle 2026-05-22 round 2):
+//   NEW-03 — savePage has a function-level concurrency guard using a ref.
+//             Previously, the guard only existed as a UI `disabled` prop.
+//             Two concurrent calls (keyboard shortcut + button click) would
+//             produce two Walrus blobs and two NEAR transactions.
+//   NEW-01 — AbortController cleanup on all async operations via useRef.
+//             Prevents setState-after-unmount on long-running TEE operations.
 // ─────────────────────────────────────────────────────────────────────────────
 export function useWiki(nearAccountId: string) {
   const [state, setState] = useState<WikiState>({
@@ -44,6 +52,19 @@ export function useWiki(nearAccountId: string) {
     pointer: null,
     isNewPage: false,
   });
+
+  // NEW-03: Synchronous lock for savePage — prevents double-upload/double-tx
+  const savingRef = useRef(false);
+
+  // NEW-01: AbortController for active vault read/write operations
+  const abortRef = useRef<AbortController | null>(null);
+
+  // NEW-01: Cancel in-flight requests on unmount
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -72,6 +93,11 @@ export function useWiki(nearAccountId: string) {
   // ── Select / read a page ───────────────────────────────────────────────────
 
   async function selectPage(slug: string) {
+    // Cancel any previous in-flight read
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setState((s) => ({
       ...s, status: 'fetching-pointer', selectedSlug: slug,
       isNewPage: false, content: '', savedContent: '', pointer: null,
@@ -80,13 +106,22 @@ export function useWiki(nearAccountId: string) {
       const pointer = await nearRpc.getWikiPointer(nearAccountId, slug);
       if (!pointer) throw new Error(`No pointer found for slug "${slug}"`);
 
+      if (controller.signal.aborted) return;
       setState((s) => ({ ...s, status: 'decrypting-tee', pointer }));
-      const { plaintext } = await agent.vaultRead(nearAccountId, pointer.blob_id, pointer.content_sha256);
 
+      const { plaintext } = await agent.vaultRead(
+        nearAccountId,
+        pointer.blob_id,
+        pointer.content_sha256,
+        controller.signal,
+      );
+
+      if (controller.signal.aborted) return;
       setState((s) => ({
         ...s, status: 'idle', content: plaintext, savedContent: plaintext,
       }));
     } catch (e) {
+      if (controller.signal.aborted) return;
       setError((e as Error).message);
     }
   }
@@ -94,6 +129,7 @@ export function useWiki(nearAccountId: string) {
   // ── Start new page ─────────────────────────────────────────────────────────
 
   function startNewPage() {
+    abortRef.current?.abort();
     setState((s) => ({
       ...s, status: 'idle', selectedSlug: null, isNewPage: true,
       content: '', savedContent: '', pointer: null, errorMessage: null,
@@ -103,17 +139,34 @@ export function useWiki(nearAccountId: string) {
   // ── Save (create or update) ────────────────────────────────────────────────
 
   async function savePage(slug: string) {
+    // NEW-03: Function-level concurrency guard.
+    // UI disabled prop alone is not enough — keyboard shortcuts or programmatic
+    // calls can bypass it. Two concurrent saves = two Walrus blobs + two NEAR txns.
+    if (savingRef.current) return;
+    savingRef.current = true;
+
+    // Cancel any stale vault-read abort controller to avoid conflicts
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // Capture content at call-time, not after async gaps (stale closure prevention)
     const currentContent = state.content;
+
     setState((s) => ({ ...s, status: 'saving-walrus', errorMessage: null }));
     try {
       // 1. Encrypt + upload to Walrus via TEE agent
       const { blobId, contentSha256 } = await agent.vaultWrite(
-        nearAccountId, 'wiki', slug, currentContent,
+        nearAccountId, 'wiki', slug, currentContent, controller.signal,
       );
+
+      if (controller.signal.aborted) return;
 
       // 2. Commit pointer to NEAR contract
       setState((s) => ({ ...s, status: 'committing-near' }));
       await wallet.updateWikiPointer(slug, blobId, contentSha256);
+
+      if (controller.signal.aborted) return;
 
       // 3. Update local state
       const pointer: VaultPointer = {
@@ -128,7 +181,10 @@ export function useWiki(nearAccountId: string) {
         slugs: s.slugs.includes(slug) ? s.slugs : [...s.slugs, slug],
       }));
     } catch (e) {
+      if (controller.signal.aborted) return;
       setError((e as Error).message);
+    } finally {
+      savingRef.current = false;
     }
   }
 

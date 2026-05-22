@@ -6,7 +6,8 @@ import { IS_PROD_AGENT } from '../../../api/gateway';
 
 export default function SkillConsole({ nearAccountId }: { nearAccountId: string }) {
   const { skills } = useSkills(nearAccountId);
-  const { prompt, llmApiKey, state, handlePromptChange, setLlmApiKey, execute, reset } = useSkillExecutor(nearAccountId);
+  const { prompt, state, handlePromptChange, execute, reset } = useSkillExecutor(nearAccountId);
+
   const [skillId, setSkillId] = useState<string>('');
   const outputRef = useRef<HTMLDivElement>(null);
 
@@ -117,29 +118,6 @@ export default function SkillConsole({ nearAccountId }: { nearAccountId: string 
               onDismiss={state.status === 'zdr-blocked' ? reset : undefined}
             />
 
-            {/* LLM API key — dev mode only, never shown in production */}
-            {!IS_PROD_AGENT && (
-              <div>
-                <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 6 }}>
-                  LLM API Key
-                  <span className="badge badge-amber" style={{ marginLeft: 8, fontSize: 9 }}>DEV ONLY · IN-MEMORY</span>
-                </label>
-                <input
-                  id="console-llm-key"
-                  type="password"
-                  className="input input-mono"
-                  placeholder="sk-… (transient, never persisted or logged)"
-                  value={llmApiKey}
-                  onChange={(e) => setLlmApiKey(e.target.value)}
-                  style={{ fontSize: 12 }}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p style={{ margin: '5px 0 0', fontSize: 10, color: 'var(--color-text-3)', lineHeight: 1.5 }}>
-                  Production (IronClaw): key lives in TEE secrets. This field is hidden.
-                </p>
-              </div>
-            )}
 
             {/* Execute button */}
             <button

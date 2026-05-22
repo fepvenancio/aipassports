@@ -1,0 +1,36 @@
+/*
+  Cloudflare Pages security headers — applies to every response from this origin.
+  HIGH-P2-3: These headers were missing entirely. Absent headers enabled:
+    - Clickjacking (no frame-ancestors restriction)
+    - MIME sniffing attacks (no nosniff)
+    - Referrer leakage to external domains
+    - Missing HSTS (allows HTTP downgrade on first visit)
+*/
+
+/*
+  Content-Security-Policy:
+    default-src 'self'              — block all unexpected resource origins
+    script-src 'self'               — no inline scripts, no CDN scripts
+    style-src 'self' fonts.googleapis.com — Google Fonts CSS only
+    font-src 'self' fonts.gstatic.com    — Google Fonts files only
+    connect-src 'self'              — fetch() only to same origin (agent proxied via /api)
+      https://rpc.testnet.near.org
+      https://rpc.mainnet.near.org
+      https://wallet.testnet.near.org
+      https://wallet.mainnet.near.org  — NEAR RPC and wallet selector
+    img-src 'self' data:            — inline data URIs for icons
+    frame-ancestors 'none'          — blocks ALL framing (clickjacking prevention)
+    object-src 'none'               — no plugins (Flash, Java, etc.)
+    base-uri 'self'                 — blocks base tag injection
+    form-action 'self'              — prevents form hijacking to external URLs
+    upgrade-insecure-requests       — force HTTPS on mixed-content subresources
+*/
+/
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://rpc.testnet.near.org https://rpc.mainnet.near.org https://wallet.testnet.near.org https://wallet.mainnet.near.org; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin

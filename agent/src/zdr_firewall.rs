@@ -7,17 +7,13 @@
 ///         sensitive-keyword scanning on all outbound LLM payloads.
 ///
 /// Security hardening applied (audit cycle 2026-05-22):
-///   C-02 — Destination matching now uses EXACT match for OpenAI and Anthropic,
-///           and validated URL host+path for Vertex AI. `starts_with()` was replaced
-///           because it permitted SSRF via path extension / redirect chains.
-///           Redirect following on the reqwest client in skill_executor.rs is also
-///           disabled — see that module for the complementary fix.
-///   C-03 — `scan_sensitive_keywords()` now applies Unicode NFKC normalization
-///           before scanning so Cyrillic/Greek homoglyphs and zero-width characters
-///           cannot bypass the keyword filter.
-///   C-03 — Keyword list synchronized exactly to FIREWALL.md §4.1 spec.
-///           Added: AUTH_TOKEN, WALLET_SECRET. Removed: ACCESS_TOKEN, CREDENTIALS
-///           (which were in the implementation but not in the spec).
+///   C-02 — Destination matching uses EXACT match for OpenAI/Anthropic and
+///           validated URL host+path+scheme for Vertex AI.
+///   C-03 — `scan_sensitive_keywords()` applies NFKC normalization + rejects
+///           non-ASCII (homoglyphs) + strips ASCII control chars (TAB bypass fix).
+///   CRITICAL-R5 — ASCII control chars (TAB 0x09, LF, CR, NULL) were not stripped,
+///           allowing "PRIVATE\tKEY" to bypass all 11 sensitive markers. Fixed by
+///           adding an explicit `c.is_ascii_control()` filter step before scanning.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,27 +110,18 @@ pub fn verify_destination(url: &str) -> Result<(), FirewallError> {
 
 // ─── Keyword Scanning ────────────────────────────────────────────────────────
 
-/// C-03 FIX: Scan `payload` for sensitive credential markers.
+/// CRITICAL-R5 FIX: Scan `payload` for sensitive credential markers.
 ///
-/// Defence-in-depth strategy against homoglyph bypasses:
+/// Defence-in-depth strategy against bypass techniques:
 ///
-/// 1. **Non-ASCII rejection**: Any non-ASCII character is treated as suspicious
-///    and causes an immediate block. This is the most robust defence against
-///    Cyrillic/Greek/Mathematical homoglyphs (e.g. Cyrillic І U+0406 ≈ Latin I).
-///    Legitimate LLM prompts do not require non-ASCII characters in credential
-///    keyword positions.
-///
-/// 2. **Zero-width character stripping**: Before the ASCII check, invisible
-///    splitter characters (U+200B zero-width space, U+200C/D/FEFF) are stripped
-///    so that "P​RIVATE_KEY" (with invisible splitter) normalizes to "PRIVATE_KEY".
-///
-/// 3. **NFKC normalization on the ASCII-clean payload**: Handles halfwidth/
-///    fullwidth ASCII variants (Ａ→A) and mathematical italic letters.
-///
-/// Trade-off: Rejecting non-ASCII means the scanner cannot process multilingual
-/// prompts. This is intentional — the ZDR firewall is a security boundary, not
-/// a language translation layer. Users who need non-Latin prompts should not
-/// be including credential markers in them.
+/// 1. **Zero-width character stripping** (U+200B, U+200C, U+200D, U+FEFF)
+/// 2. **NFKC normalization** — halfwidth/fullwidth ASCII variants (Ａ→A)
+/// 3. **Non-ASCII rejection** — Cyrillic/Greek/Mathematical homoglyphs
+/// 4. **ASCII control character rejection** (CRITICAL-R5 fix):
+///    TAB (0x09) was the confirmed bypass — `PRIVATE\tKEY` passed all prior
+///    filters because TAB is ASCII (< 0x7F), not zero-width, and not non-ASCII.
+///    All control chars 0x00-0x1F and 0x7F (DEL) are now rejected.
+/// 5. **Uppercase scan** against all SENSITIVE_MARKERS
 pub fn scan_sensitive_keywords(payload: &str) -> Result<(), FirewallError> {
     // Step 1: Strip zero-width invisible splitter characters
     let stripped: String = payload
@@ -150,16 +137,26 @@ pub fn scan_sensitive_keywords(payload: &str) -> Result<(), FirewallError> {
     // Step 2: NFKC normalization (handles halfwidth/fullwidth variants)
     let normalized: String = stripped.nfkc().collect();
 
-    // Step 3: Reject any non-ASCII character — this catches all Cyrillic/Greek/
-    // Mathematical homoglyphs that NFKC does not collapse to ASCII.
-    // A legitimate user prompt should never need Cyrillic in a credential keyword.
+    // Step 3: Reject any non-ASCII character — blocks Cyrillic/Greek/Mathematical homoglyphs
     if !normalized.is_ascii() {
         return Err(FirewallError::SensitiveContentBlocked(
             "NON_ASCII_SUSPICIOUS_UNICODE".to_string()
         ));
     }
 
-    // Step 4: Uppercase and scan (all chars are now guaranteed ASCII)
+    // Step 4: CRITICAL-R5 FIX — reject ASCII control characters.
+    // is_ascii() returns true for ALL bytes 0x00-0x7F, including:
+    //   TAB (0x09), LF (0x0A), CR (0x0D), NULL (0x00), DEL (0x7F)
+    // These were not blocked by the zero-width filter or non-ASCII check.
+    // CONFIRMED BYPASS: "PRIVATE\tKEY" → TAB passes all prior checks → no PRIVATE_KEY match.
+    // FIX: Reject any payload containing ASCII control characters (0x00-0x1F, 0x7F).
+    if normalized.chars().any(|c| c.is_ascii_control()) {
+        return Err(FirewallError::SensitiveContentBlocked(
+            "ASCII_CONTROL_CHAR_SUSPICIOUS".to_string()
+        ));
+    }
+
+    // Step 5: Uppercase and scan (all chars are now guaranteed printable ASCII)
     let upper = normalized.to_uppercase();
     for marker in SENSITIVE_MARKERS {
         if upper.contains(marker) {
@@ -341,6 +338,33 @@ mod tests {
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("anthropic-beta".to_string(), "zero-retention-2025-04-01".to_string()));
         assert_eq!(headers[1], ("x-anthropic-zdr".to_string(), "true".to_string()));
+    }
+
+    /// CRITICAL-R5: Verify that TAB between keyword parts is blocked.
+    /// Previously: "PRIVATE\tKEY" passed all filters because TAB is ASCII
+    /// and was not in the zero-width strip list. Now: rejected as ASCII control char.
+    #[test]
+    fn test_c05_ascii_control_tab_blocked() {
+        // TAB between PRIVATE and KEY
+        assert!(
+            scan_sensitive_keywords("PRIVATE\tKEY=ed25519:secret").is_err(),
+            "TAB-separated PRIVATE_KEY must be blocked"
+        );
+    }
+
+    /// CRITICAL-R5: Verify all ASCII control char variants are blocked.
+    #[test]
+    fn test_c05_all_control_char_variants_blocked() {
+        // NULL byte split
+        assert!(scan_sensitive_keywords("PRIVATE\x00KEY=secret").is_err(), "NULL split must be blocked");
+        // LF split
+        assert!(scan_sensitive_keywords("PRIVATE\nKEY=secret").is_err(), "LF split must be blocked");
+        // CR split
+        assert!(scan_sensitive_keywords("PRIVATE\rKEY=secret").is_err(), "CR split must be blocked");
+        // Other keywords with TAB
+        assert!(scan_sensitive_keywords("API\tKEY=sk-abc").is_err(), "API\tKEY must be blocked");
+        assert!(scan_sensitive_keywords("SEED\tPHRASE=word1 word2").is_err(), "SEED\tPHRASE must be blocked");
+        assert!(scan_sensitive_keywords("AUTH\tTOKEN=xyz").is_err(), "AUTH\tTOKEN must be blocked");
     }
 
     /// Compile-time check: SENSITIVE_MARKERS must include all 11 markers from FIREWALL.md §4.1.
