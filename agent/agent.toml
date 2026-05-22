@@ -1,0 +1,16 @@
+# IronClaw Manifest for Shade Agent TEE deployment
+[agent]
+name = "shade-agent"
+version = "0.1.0"
+tee = "intel-tdx"
+
+[resources]
+cpu = 2
+memory = "4Gi"
+
+[env]
+TEE_SIMULATION = "true"
+WALRUS_PUBLISHER_URL = "http://localhost:31600"
+WALRUS_AGGREGATOR_URL = "http://localhost:31601"
+WALRUS_STORAGE_EPOCHS = "5"
+PORT = "8080"

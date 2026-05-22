@@ -11,6 +11,5 @@ build/
 .ai/
 *.log
 pepper.key
-frontend/
 target/
 backend/target/

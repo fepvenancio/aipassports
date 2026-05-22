@@ -1,93 +1,82 @@
-use near_sdk::store::LookupMap;
-use near_sdk::{env, near, require, AccountId};
+use near_sdk::{env, near};
 
-/// @title WikiPage
-/// @notice Represents an encrypted wiki page stored on-chain.
-#[near(serializers = [borsh, json])]
-#[derive(Clone)]
-pub struct WikiPage {
-    /// @notice SHA-256 integrity hash of the raw markdown content.
-    pub content_hash: String,
-    /// @notice The encrypted payload, ciphered with the user's per-session DEK.
-    pub encrypted_payload: String,
-}
+// //////////////////////////////////////////////////////////////
+//                          DATA MODEL
+// //////////////////////////////////////////////////////////////
 
-/// @title Skill
-/// @notice Represents an encrypted skill configuration stored on-chain.
+/// @title VaultPointer
+/// @notice Represents a pointer to an encrypted blob stored on Walrus Protocol.
+/// @dev The contract stores only this lightweight metadata — never the encrypted payload itself.
 #[near(serializers = [borsh, json])]
-#[derive(Clone)]
-pub struct Skill {
-    /// @notice Unique identifier of the custom LLM skill.
-    pub skill_id: String,
-    /// @notice JSON schema structure defining input parameters, encrypted.
-    pub encrypted_config: String,
+#[derive(Clone, Debug, PartialEq)]
+pub struct VaultPointer {
+    /// @notice The opaque Walrus blobId address locating the encrypted blob on Walrus.
+    pub blob_id: String,
+
+    /// @notice The SHA-256 integrity hash of the raw plaintext before encryption.
+    /// @dev Used by the client to guarantee no tampering has occurred after decryption.
+    pub content_sha256: String,
+
+    /// @notice Unix timestamp in milliseconds when the pointer was last updated.
+    pub updated_at_ms: u64,
 }
 
 // //////////////////////////////////////////////////////////////
-//                          VAULT STATE
+//                      VALIDATION HELPERS
 // //////////////////////////////////////////////////////////////
 
-/// @title VaultAggregate
-/// @notice Manages the storage of encrypted WikiPages and Skills state natively on-chain.
-#[near(serializers = [borsh])]
-pub struct VaultAggregate {
-    /// @notice Cryptographic owner of this sovereign vault.
-    pub owner_id: AccountId,
-    /// @notice Persistent map of page IDs to their encrypted contents.
-    pub wiki_pages: LookupMap<String, WikiPage>,
-    /// @notice Persistent map of skill IDs to their encrypted configurations.
-    pub skills: LookupMap<String, Skill>,
-}
-
-impl VaultAggregate {
-    /// @notice Initializes a new VaultAggregate.
-    pub fn new(owner_id: AccountId) -> Self {
-        Self {
-            owner_id,
-            wiki_pages: LookupMap::new(b"w"),
-            skills: LookupMap::new(b"s"),
+/// @notice Validates a page slug or skill ID according to strict structural rules.
+/// @dev Rule: ^[a-z0-9][a-z0-9_-]{0,127}$
+///      Start with [a-z0-9] (lowercase alphanumeric).
+///      Subsequent characters must be [a-z0-9_-].
+///      Total length must be between 1 and 128 characters.
+///      Panics with "VAULT_ERROR_INVALID_IDENTIFIER" on failure.
+pub fn validate_identifier(id: &str) {
+    let len = id.len();
+    if len == 0 || len > 128 {
+        env::panic_str("VAULT_ERROR_INVALID_IDENTIFIER");
+    }
+    
+    let mut chars = id.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        env::panic_str("VAULT_ERROR_INVALID_IDENTIFIER");
+    }
+    
+    for c in chars {
+        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' && c != '_' {
+            env::panic_str("VAULT_ERROR_INVALID_IDENTIFIER");
         }
     }
+}
 
-    /// @notice Ensures that only the cryptographic owner of the NEAR account can unlock or modify the Vault state.
-    pub fn assert_owner(&self) {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "VAULT_ERROR_UNAUTHORIZED"
-        );
+/// @notice Validates that a Walrus blob_id is structurally safe and non-empty.
+/// @dev Rule: Must be non-empty, max 128 characters, and contain only printable ASCII.
+///      Panics with "VAULT_ERROR_INVALID_BLOB_ID" on failure.
+pub fn validate_blob_id(blob_id: &str) {
+    let len = blob_id.len();
+    if len == 0 || len > 128 {
+        env::panic_str("VAULT_ERROR_INVALID_BLOB_ID");
     }
-
-    /// @notice Internal validation helper to ensure storage keys meet structural invariants.
-    fn _check_id_valid(&self, id: &str) {
-        require!(
-            !id.trim().is_empty() && id.len() <= 128,
-            "VAULT_ERROR_INVALID_IDENTIFIER"
-        );
+    
+    for c in blob_id.chars() {
+        if !c.is_ascii() || c.is_ascii_control() {
+            env::panic_str("VAULT_ERROR_INVALID_BLOB_ID");
+        }
     }
+}
 
-    /// @notice Stores an encrypted wiki page.
-    pub fn add_wiki_page(&mut self, page_id: String, page: WikiPage) {
-        self.assert_owner();
-        self._check_id_valid(&page_id);
-        self.wiki_pages.insert(page_id, page);
+/// @notice Validates that a content hash is a valid 64-character lowercase hex digest.
+/// @dev Rule: Exactly 64 characters, lowercase hex only [0-9a-f].
+///      Panics with "VAULT_ERROR_INVALID_HASH" on failure.
+pub fn validate_content_sha256(hash: &str) {
+    if hash.len() != 64 {
+        env::panic_str("VAULT_ERROR_INVALID_HASH");
     }
-
-    /// @notice Stores an encrypted skill config.
-    pub fn add_skill(&mut self, skill_id: String, skill: Skill) {
-        self.assert_owner();
-        self._check_id_valid(&skill_id);
-        self.skills.insert(skill_id, skill);
-    }
-
-    /// @notice Retrieves a wiki page.
-    pub fn get_wiki_page(&self, page_id: &String) -> Option<&WikiPage> {
-        self.assert_owner();
-        self.wiki_pages.get(page_id)
-    }
-
-    /// @notice Retrieves a skill.
-    pub fn get_skill(&self, skill_id: &String) -> Option<&Skill> {
-        self.assert_owner();
-        self.skills.get(skill_id)
+    
+    for c in hash.chars() {
+        if !c.is_ascii_hexdigit() || (c.is_ascii_alphabetic() && !c.is_ascii_lowercase()) {
+            env::panic_str("VAULT_ERROR_INVALID_HASH");
+        }
     }
 }
