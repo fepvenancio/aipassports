@@ -1,0 +1,18 @@
+name = "aegis-mcp-bridge"
+main = "src/index.ts"
+compatibility_date = "2025-05-22"
+compatibility_flags = ["nodejs_compat"]
+
+# Worker secrets — set via `wrangler secret put`:
+#   wrangler secret put IRONCLAW_AGENT_API_KEY
+#   wrangler secret put IRONCLAW_AGENT_BASE_URL
+
+[vars]
+# Non-sensitive defaults (overridden by secrets in production).
+# IRONCLAW_AGENT_BASE_URL defaults to the Azure ACI enclave endpoint.
+# Override locally with: wrangler dev --var IRONCLAW_AGENT_BASE_URL:http://localhost:8080
+IRONCLAW_AGENT_BASE_URL = "https://api.aipassports.xyz"
+
+[[rules]]
+type = "ESModule"
+globs = ["**/*.ts"]
