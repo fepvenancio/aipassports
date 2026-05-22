@@ -117,12 +117,16 @@ export async function vaultWrite(
  */
 export async function vaultRead(
   nearAccountId: string,
+  entryType: 'wiki' | 'skill',
+  identifier: string,
   blobId: string,
   contentSha256: string,
   signal?: AbortSignal,
 ): Promise<{ plaintext: string; metadata: Record<string, unknown> }> {
   return agentPost<{ plaintext: string; metadata: Record<string, unknown> }>('/vault/read', {
     nearAccountId,
+    entryType,
+    identifier,
     blobId,
     contentSha256,
   }, signal);

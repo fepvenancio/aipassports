@@ -82,4 +82,12 @@ export interface Env {
   readonly IRONCLAW_AGENT_API_KEY: string;
   /** Base URL of the Shade Agent (e.g. https://api.aipassports.xyz or http://localhost:8080). */
   readonly IRONCLAW_AGENT_BASE_URL: string;
+  /** Cloudflare KV for storing temporary challenges/nonces */
+  readonly CHALLENGES_KV: KVNamespace;
+  /** Cloudflare KV for storing active user sessions */
+  readonly SESSIONS_KV: KVNamespace;
+  /** Optional gateway function call key public key for delegation checks */
+  readonly GATEWAY_FUNCKEY_PUBKEY?: string;
+  /** Optional NEAR RPC URL override */
+  readonly NEAR_RPC_URL?: string;
 }

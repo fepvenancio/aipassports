@@ -116,11 +116,15 @@ fn build_writer_client() -> Result<Client, WriterError> {
 /// @notice Encrypts plaintext JSON, packs it into the binary envelope, and publishes it to Walrus.
 /// @param master_secret The platform's master secret.
 /// @param near_account_id The owner's unique NEAR account ID.
+/// @param entry_type The category of the vault entry (e.g. "wiki" or "skill").
+/// @param identifier The specific record identifier (e.g. page slug or skill name).
 /// @param plaintext The raw UTF-8 string to be encrypted (Wiki content or Skill JSON).
 /// @param epochs Storage duration in epochs (max 52 ≈ 1 year).
 pub async fn encrypt_and_publish(
     master_secret: &[u8; 32],
     near_account_id: &str,
+    entry_type: &str,
+    identifier: &str,
     plaintext: &str,
     epochs: u64,
 ) -> Result<WriteResult, WriterError> {
@@ -130,7 +134,7 @@ pub async fn encrypt_and_publish(
     }
 
     // 1. HIGH-R7: Derive User's Data Encryption Key (DEK) — wrapped in Zeroizing
-    let dek = Zeroizing::new(key_derivation::derive_dek(master_secret, near_account_id)?);
+    let dek = Zeroizing::new(key_derivation::derive_dek(master_secret, near_account_id, entry_type, identifier)?);
 
     // 2. Generate cryptographically secure random 12-byte IV
     let mut iv = [0u8; 12];
@@ -233,10 +237,10 @@ mod tests {
     #[tokio::test]
     async fn test_epochs_cap_rejected() {
         let master = [0u8; 32];
-        let result = encrypt_and_publish(&master, "alice.near", "test", u64::MAX).await;
+        let result = encrypt_and_publish(&master, "alice.near", "wiki", "home", "test", u64::MAX).await;
         assert!(matches!(result, Err(WriterError::EpochsTooLarge(_, _))), "u64::MAX epochs must be rejected");
 
-        let result2 = encrypt_and_publish(&master, "alice.near", "test", 53).await;
+        let result2 = encrypt_and_publish(&master, "alice.near", "wiki", "home", "test", 53).await;
         assert!(matches!(result2, Err(WriterError::EpochsTooLarge(53, 52))), "53 epochs must be rejected");
     }
 }

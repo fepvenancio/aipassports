@@ -41,7 +41,11 @@ export function useSkills(nearAccountId: string) {
             if (pointer) {
               try {
                 const { plaintext } = await agent.vaultRead(
-                  nearAccountId, pointer.blob_id, pointer.content_sha256,
+                  nearAccountId,
+                  'skill',
+                  id,
+                  pointer.blob_id,
+                  pointer.content_sha256,
                 );
                 config = JSON.parse(plaintext) as SkillConfig;
               } catch {

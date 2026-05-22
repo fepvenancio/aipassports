@@ -111,6 +111,8 @@ export function useWiki(nearAccountId: string) {
 
       const { plaintext } = await agent.vaultRead(
         nearAccountId,
+        'wiki',
+        slug,
         pointer.blob_id,
         pointer.content_sha256,
         controller.signal,

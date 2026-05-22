@@ -16,3 +16,11 @@ IRONCLAW_AGENT_BASE_URL = "https://api.aipassports.xyz"
 [[rules]]
 type = "ESModule"
 globs = ["**/*.ts"]
+
+[[kv_namespaces]]
+binding = "CHALLENGES_KV"
+id = "CHALLENGES_KV_PLACEHOLDER"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "SESSIONS_KV_PLACEHOLDER"

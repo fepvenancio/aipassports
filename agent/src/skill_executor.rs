@@ -151,6 +151,8 @@ pub async fn execute_skill(
     let decrypted_json = vault_reader::download_and_decrypt(
         master_secret,
         &req.near_account_id,
+        "skill",
+        &req.blob_id,
         &req.blob_id,
         &req.expected_sha256,
     ).await?;

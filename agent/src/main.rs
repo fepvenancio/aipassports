@@ -141,6 +141,8 @@ impl IntoResponse for AppError {
 #[serde(rename_all = "camelCase")]
 struct WriteRequest {
     near_account_id: String,
+    entry_type: String,
+    identifier: String,
     plaintext: String,
     epochs: Option<u64>,
 }
@@ -157,6 +159,8 @@ struct WriteResponse {
 #[serde(rename_all = "camelCase")]
 struct ReadRequest {
     near_account_id: String,
+    entry_type: String,
+    identifier: String,
     blob_id: String,
     expected_sha256: String,
 }
@@ -195,6 +199,26 @@ fn validate_blob_id(id: &str) -> Result<(), (StatusCode, &'static str)> {
     }
     if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err((StatusCode::BAD_REQUEST, "INVALID_BLOB_ID: only [a-zA-Z0-9_-] allowed"));
+    }
+    Ok(())
+}
+
+/// Validate that the entry type is one of the supported domain separation types.
+fn validate_entry_type(entry_type: &str) -> Result<(), (StatusCode, &'static str)> {
+    if entry_type == "wiki" || entry_type == "skill" {
+        Ok(())
+    } else {
+        Err((StatusCode::BAD_REQUEST, "INVALID_ENTRY_TYPE: must be 'wiki' or 'skill'"))
+    }
+}
+
+/// Validate that the identifier is a safe and correct alphanumeric/hyphen/underscore name.
+fn validate_identifier(id: &str) -> Result<(), (StatusCode, &'static str)> {
+    if id.is_empty() || id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "INVALID_IDENTIFIER: length must be 1-128 chars"));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST, "INVALID_IDENTIFIER: only [a-zA-Z0-9_-] allowed"));
     }
     Ok(())
 }
@@ -358,6 +382,13 @@ async fn vault_write_handler(
     if let Err((status, msg)) = validate_near_account_id(&req.near_account_id) {
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
     }
+    // Validate entry_type and identifier
+    if let Err((status, msg)) = validate_entry_type(&req.entry_type) {
+        return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
+    }
+    if let Err((status, msg)) = validate_identifier(&req.identifier) {
+        return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
+    }
 
     info!("Processing vault write for NEAR Account: {}", req.near_account_id);
     let epochs = req.epochs.unwrap_or(26);
@@ -365,6 +396,8 @@ async fn vault_write_handler(
     let result = vault_writer::encrypt_and_publish(
         &state.master_secret,
         &req.near_account_id,
+        &req.entry_type,
+        &req.identifier,
         &req.plaintext,
         epochs,
     )
@@ -393,12 +426,21 @@ async fn vault_read_handler(
     if let Err((status, msg)) = validate_blob_id(&req.blob_id) {
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
     }
+    // Validate entry_type and identifier
+    if let Err((status, msg)) = validate_entry_type(&req.entry_type) {
+        return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
+    }
+    if let Err((status, msg)) = validate_identifier(&req.identifier) {
+        return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
+    }
 
     info!("Processing vault read for NEAR Account: {}, blobId: {}", req.near_account_id, req.blob_id);
 
     let plaintext = vault_reader::download_and_decrypt(
         &state.master_secret,
         &req.near_account_id,
+        &req.entry_type,
+        &req.identifier,
         &req.blob_id,
         &req.expected_sha256,
     )

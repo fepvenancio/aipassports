@@ -21,9 +21,6 @@ pub const MASTER_SECRET_LEN: usize = 32;
 /// Length of the derived data encryption key (DEK) in bytes.
 pub const DEK_LEN: usize = 32;
 
-/// Constant info context parameter mixed into HKDF derivation to enforce domain separation.
-pub const HKDF_INFO_CONTEXT: &[u8] = b"aipassport-dek-v1";
-
 /// @notice Custom errors for the key derivation module.
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -118,14 +115,23 @@ pub fn load_master_secret() -> Result<[u8; MASTER_SECRET_LEN], KeyError> {
     }
 }
 
-/// @notice Derives a per-user Data Encryption Key (DEK) using HKDF-SHA256.
+/// @notice Derives a per-user, domain-separated Data Encryption Key (DEK) using HKDF-SHA256.
 /// @param master_secret The platform's master secret.
 /// @param near_account_id The owner's unique NEAR account ID (acts as the salt).
+/// @param entry_type The category of the vault entry (e.g. "wiki" or "skill").
+/// @param identifier The specific record identifier (e.g. page slug or skill name).
 /// @dev Multi-tenant isolation is cryptographically guaranteed because the account ID is mixed as the salt.
-pub fn derive_dek(master_secret: &[u8; MASTER_SECRET_LEN], near_account_id: &str) -> Result<[u8; DEK_LEN], KeyError> {
+///      Domain separation prevents cross-endpoint key reuse by binding the key to entry_type and identifier.
+pub fn derive_dek(
+    master_secret: &[u8; MASTER_SECRET_LEN],
+    near_account_id: &str,
+    entry_type: &str,
+    identifier: &str,
+) -> Result<[u8; DEK_LEN], KeyError> {
     let hk = Hkdf::<Sha256>::new(Some(near_account_id.as_bytes()), master_secret);
+    let info = format!("aipassport-dek-v1:{}:{}", entry_type, identifier);
     let mut dek = [0u8; DEK_LEN];
-    hk.expand(HKDF_INFO_CONTEXT, &mut dek)
+    hk.expand(info.as_bytes(), &mut dek)
         .map_err(|_| KeyError::HkdfExpansionFailed)?;
     Ok(dek)
 }
@@ -142,14 +148,22 @@ mod tests {
     fn test_dek_derivation_determinism_and_isolation() {
         let master_secret = [0x55u8; MASTER_SECRET_LEN];
         
-        let dek_alice1 = derive_dek(&master_secret, "alice.near").unwrap();
-        let dek_alice2 = derive_dek(&master_secret, "alice.near").unwrap();
-        let dek_bob = derive_dek(&master_secret, "bob.near").unwrap();
-
+        let dek_alice1 = derive_dek(&master_secret, "alice.near", "wiki", "home").unwrap();
+        let dek_alice2 = derive_dek(&master_secret, "alice.near", "wiki", "home").unwrap();
+        let dek_bob = derive_dek(&master_secret, "bob.near", "wiki", "home").unwrap();
+        
         // Determinism: Same input must produce the same DEK
         assert_eq!(dek_alice1, dek_alice2);
 
-        // Isolation: Different account IDs must produce distinct DEKs
+        // Multi-tenant Isolation: Different account IDs must produce distinct DEKs
         assert_ne!(dek_alice1, dek_bob);
+
+        // Domain Separation: Different entry types must produce distinct DEKs
+        let dek_alice_skill = derive_dek(&master_secret, "alice.near", "skill", "home").unwrap();
+        assert_ne!(dek_alice1, dek_alice_skill);
+
+        // Domain Separation: Different identifiers must produce distinct DEKs
+        let dek_alice_page2 = derive_dek(&master_secret, "alice.near", "wiki", "about").unwrap();
+        assert_ne!(dek_alice1, dek_alice_page2);
     }
 }

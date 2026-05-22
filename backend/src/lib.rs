@@ -22,6 +22,17 @@ pub enum StorageKey {
 /// @title Aegis Shared Multi-User Smart Contract
 /// @notice The entry point for the Project Aegis NEAR Smart Contract.
 /// @dev Implements a stateless, secure multi-tenant pointer index partitioned via composite keys.
+///
+/// Security hardening applied (audit cycle 2026-05-22 round 2):
+///   F-02           — MAX_ENTRIES_PER_USER=1000 cap on wiki/skill Vec growth.
+///                    Prevents storage staking attack + gas exhaustion via unbounded iteration.
+///   F-06           — from_index cast from u64 → usize via safe checked_cast, panicking
+///                    with a clear error on WASM32 overflow (u64 > usize::MAX on 32-bit).
+///   MEDIUM-P2-5    — checked_mul().unwrap() replaced with checked_mul().unwrap_or_else(||
+///                    panic_str("VAULT_ERROR_DEPOSIT_OVERFLOW")). Explicit overflow message.
+///   P3-6           — VaultPointer now includes `version: u8` as first Borsh field.
+///   P3-7           — validate_blob_id enforces base58 alphabet (no printable ASCII garbage).
+///   P3-8           — Promise refunds log via env::log_str before dispatch for auditability.
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct AegisContract {
@@ -72,11 +83,53 @@ impl AegisContract {
 
         let composite_key = format!("{}:{}", caller.as_str(), slug);
 
-        // Storage tracking before write
-        let initial_storage = env::storage_usage();
         let is_new = !self.wiki_pointers.contains_key(&composite_key);
 
+        // F-02: Enforce max-entries cap before inserting a new entry.
+        // Prevents unbounded Vec growth via repeated calls.
+        if is_new {
+            let current_count = self.wiki_slug_lists
+                .get(&caller)
+                .map_or(0, |v| v.len());
+            if current_count >= vault::MAX_ENTRIES_PER_USER {
+                env::panic_str("VAULT_ERROR_MAX_ENTRIES_REACHED");
+            }
+        }
+
+        // Calculate storage byte changes manually
+        let mut bytes_added = 0u64;
+        let mut bytes_freed = 0u64;
+
+        if is_new {
+            // New key-value pair in wiki_pointers
+            let key_size = 1 + 4 + composite_key.len() as u64;
+            // version(1) + blob_id(4 + len) + content_sha256(4 + 64) + updated_at_ms(8)
+            let val_size = 1 + 4 + blob_id.len() as u64 + 4 + content_sha256.len() as u64 + 8;
+            bytes_added += key_size + val_size + 40;
+
+            // Adding slug to wiki_slug_lists
+            let has_list = self.wiki_slug_lists.contains_key(&caller);
+            if !has_list {
+                let list_key_size = 1 + 4 + caller.as_str().len() as u64;
+                let list_val_size = 4 + 4 + slug.len() as u64;
+                bytes_added += list_key_size + list_val_size + 40;
+            } else {
+                bytes_added += 4 + slug.len() as u64;
+            }
+        } else {
+            // Updating existing pointer in wiki_pointers. Only blob_id length can change.
+            let old_pointer = self.wiki_pointers.get(&composite_key).unwrap();
+            let new_len = blob_id.len() as u64;
+            let old_len = old_pointer.blob_id.len() as u64;
+            if new_len > old_len {
+                bytes_added += new_len - old_len;
+            } else if old_len > new_len {
+                bytes_freed += old_len - new_len;
+            }
+        }
+
         let pointer = VaultPointer {
+            version: 1,
             blob_id,
             content_sha256,
             updated_at_ms: env::block_timestamp_ms(),
@@ -90,9 +143,23 @@ impl AegisContract {
             self.wiki_slug_lists.insert(caller.clone(), list);
         }
 
-        // Process storage costs
-        let final_storage = env::storage_usage();
-        self._reconcile_storage_deposit(caller, initial_storage, final_storage);
+        // Process storage costs and refunds
+        if bytes_added > bytes_freed {
+            self._reconcile_storage_deposit(caller, bytes_added - bytes_freed);
+        } else {
+            let net_freed = bytes_freed - bytes_added;
+            if net_freed > 0 {
+                self._refund_released_storage(caller.clone(), net_freed);
+            }
+            let attached_deposit = env::attached_deposit();
+            if attached_deposit.as_yoctonear() > 0 {
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR full deposit to {} (no net storage added)",
+                    attached_deposit.as_yoctonear(), caller
+                ));
+                Promise::new(caller).transfer(attached_deposit);
+            }
+        }
     }
 
     /// @notice Deletes a wiki page pointer and programmatically refunds its storage stake to the caller.
@@ -106,10 +173,13 @@ impl AegisContract {
             env::panic_str("VAULT_ERROR_NOT_FOUND");
         }
 
-        // Storage tracking before delete
-        let initial_storage = env::storage_usage();
+        let pointer = self.wiki_pointers.get(&composite_key).unwrap();
+        let mut bytes_freed = 0u64;
 
-        self.wiki_pointers.remove(&composite_key);
+        // Removing key-value pair in wiki_pointers
+        let key_size = 1 + 4 + composite_key.len() as u64;
+        let val_size = pointer.serialized_size();
+        bytes_freed += key_size + val_size + 40;
 
         // Remove slug from the enumeration list
         if let Some(mut list) = self.wiki_slug_lists.get(&caller).cloned() {
@@ -117,15 +187,22 @@ impl AegisContract {
                 list.swap_remove(pos);
                 if list.is_empty() {
                     self.wiki_slug_lists.remove(&caller);
+                    // Freeing entire list entry
+                    let list_key_size = 1 + 4 + caller.as_str().len() as u64;
+                    let list_val_size = 4 + 4 + slug.len() as u64;
+                    bytes_freed += list_key_size + list_val_size + 40;
                 } else {
                     self.wiki_slug_lists.insert(caller.clone(), list);
+                    // Freeing single element from Vec
+                    bytes_freed += 4 + slug.len() as u64;
                 }
             }
         }
 
+        self.wiki_pointers.remove(&composite_key);
+
         // Process storage refund
-        let final_storage = env::storage_usage();
-        self._refund_released_storage(caller, initial_storage, final_storage);
+        self._refund_released_storage(caller, bytes_freed);
     }
 
     /// @notice Creates or updates a skill pointer for the signing account.
@@ -140,11 +217,52 @@ impl AegisContract {
 
         let composite_key = format!("{}:{}", caller.as_str(), skill_id);
 
-        // Storage tracking before write
-        let initial_storage = env::storage_usage();
         let is_new = !self.skill_pointers.contains_key(&composite_key);
 
+        // F-02: Enforce max-entries cap before inserting a new entry.
+        if is_new {
+            let current_count = self.skill_id_lists
+                .get(&caller)
+                .map_or(0, |v| v.len());
+            if current_count >= vault::MAX_ENTRIES_PER_USER {
+                env::panic_str("VAULT_ERROR_MAX_ENTRIES_REACHED");
+            }
+        }
+
+        // Calculate storage byte changes manually
+        let mut bytes_added = 0u64;
+        let mut bytes_freed = 0u64;
+
+        if is_new {
+            // New key-value pair in skill_pointers
+            let key_size = 1 + 4 + composite_key.len() as u64;
+            // version(1) + blob_id(4 + len) + content_sha256(4 + 64) + updated_at_ms(8)
+            let val_size = 1 + 4 + blob_id.len() as u64 + 4 + content_sha256.len() as u64 + 8;
+            bytes_added += key_size + val_size + 40;
+
+            // Adding skill_id to skill_id_lists
+            let has_list = self.skill_id_lists.contains_key(&caller);
+            if !has_list {
+                let list_key_size = 1 + 4 + caller.as_str().len() as u64;
+                let list_val_size = 4 + 4 + skill_id.len() as u64;
+                bytes_added += list_key_size + list_val_size + 40;
+            } else {
+                bytes_added += 4 + skill_id.len() as u64;
+            }
+        } else {
+            // Updating existing pointer in skill_pointers. Only blob_id length can change.
+            let old_pointer = self.skill_pointers.get(&composite_key).unwrap();
+            let new_len = blob_id.len() as u64;
+            let old_len = old_pointer.blob_id.len() as u64;
+            if new_len > old_len {
+                bytes_added += new_len - old_len;
+            } else if old_len > new_len {
+                bytes_freed += old_len - new_len;
+            }
+        }
+
         let pointer = VaultPointer {
+            version: 1,
             blob_id,
             content_sha256,
             updated_at_ms: env::block_timestamp_ms(),
@@ -158,9 +276,23 @@ impl AegisContract {
             self.skill_id_lists.insert(caller.clone(), list);
         }
 
-        // Process storage costs
-        let final_storage = env::storage_usage();
-        self._reconcile_storage_deposit(caller, initial_storage, final_storage);
+        // Process storage costs and refunds
+        if bytes_added > bytes_freed {
+            self._reconcile_storage_deposit(caller, bytes_added - bytes_freed);
+        } else {
+            let net_freed = bytes_freed - bytes_added;
+            if net_freed > 0 {
+                self._refund_released_storage(caller.clone(), net_freed);
+            }
+            let attached_deposit = env::attached_deposit();
+            if attached_deposit.as_yoctonear() > 0 {
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR full deposit to {} (no net storage added)",
+                    attached_deposit.as_yoctonear(), caller
+                ));
+                Promise::new(caller).transfer(attached_deposit);
+            }
+        }
     }
 
     /// @notice Deletes a skill pointer and programmatically refunds its storage stake to the caller.
@@ -174,10 +306,13 @@ impl AegisContract {
             env::panic_str("VAULT_ERROR_NOT_FOUND");
         }
 
-        // Storage tracking before delete
-        let initial_storage = env::storage_usage();
+        let pointer = self.skill_pointers.get(&composite_key).unwrap();
+        let mut bytes_freed = 0u64;
 
-        self.skill_pointers.remove(&composite_key);
+        // Removing key-value pair in skill_pointers
+        let key_size = 1 + 4 + composite_key.len() as u64;
+        let val_size = pointer.serialized_size();
+        bytes_freed += key_size + val_size + 40;
 
         // Remove from enumeration list
         if let Some(mut list) = self.skill_id_lists.get(&caller).cloned() {
@@ -185,15 +320,22 @@ impl AegisContract {
                 list.swap_remove(pos);
                 if list.is_empty() {
                     self.skill_id_lists.remove(&caller);
+                    // Freeing entire list entry
+                    let list_key_size = 1 + 4 + caller.as_str().len() as u64;
+                    let list_val_size = 4 + 4 + skill_id.len() as u64;
+                    bytes_freed += list_key_size + list_val_size + 40;
                 } else {
                     self.skill_id_lists.insert(caller.clone(), list);
+                    // Freeing single element from Vec
+                    bytes_freed += 4 + skill_id.len() as u64;
                 }
             }
         }
 
+        self.skill_pointers.remove(&composite_key);
+
         // Process storage refund
-        let final_storage = env::storage_usage();
-        self._refund_released_storage(caller, initial_storage, final_storage);
+        self._refund_released_storage(caller, bytes_freed);
     }
 
     // //////////////////////////////////////////////////////////////
@@ -215,7 +357,10 @@ impl AegisContract {
     /// @notice Returns a paginated list of wiki slugs for an account, with limit capped at 100.
     pub fn list_wiki_slugs(&self, account_id: AccountId, from_index: u64, limit: u64) -> Vec<String> {
         let actual_limit = u64::min(limit, 100) as usize;
-        let start = from_index as usize;
+        // F-06: Safe u64 → usize cast. On WASM32, usize is 32 bits — a from_index > u32::MAX
+        // would silently truncate to 0 with `as usize`. Use checked cast to panic explicitly.
+        let start = usize::try_from(from_index)
+            .unwrap_or_else(|_| env::panic_str("VAULT_ERROR_INDEX_OUT_OF_RANGE"));
         
         if let Some(list) = self.wiki_slug_lists.get(&account_id) {
             let len = list.len();
@@ -232,7 +377,9 @@ impl AegisContract {
     /// @notice Returns a paginated list of skill IDs for an account, with limit capped at 100.
     pub fn list_skill_ids(&self, account_id: AccountId, from_index: u64, limit: u64) -> Vec<String> {
         let actual_limit = u64::min(limit, 100) as usize;
-        let start = from_index as usize;
+        // F-06: Safe u64 → usize cast.
+        let start = usize::try_from(from_index)
+            .unwrap_or_else(|_| env::panic_str("VAULT_ERROR_INDEX_OUT_OF_RANGE"));
         
         if let Some(list) = self.skill_id_lists.get(&account_id) {
             let len = list.len();
@@ -252,10 +399,15 @@ impl AegisContract {
 
     /// @notice Internal utility to reconcile storage costs.
     /// @dev Calculates bytes added, enforces deposit attached, and transfers excess back to user.
-    fn _reconcile_storage_deposit(&self, caller: AccountId, initial: u64, final_st: u64) {
-        if final_st > initial {
-            let bytes_added = final_st - initial;
-            let required_deposit = env::storage_byte_cost().as_yoctonear().checked_mul(bytes_added as u128).unwrap();
+    fn _reconcile_storage_deposit(&self, caller: AccountId, bytes_added: u64) {
+        if bytes_added > 0 {
+            // MEDIUM-P2-5: checked_mul with explicit panic message instead of opaque unwrap().
+            // Previous: checked_mul(...).unwrap() — panic message is "called Option::unwrap() on None"
+            // Fix: named error code that operators can grep for in NEAR explorer.
+            let required_deposit = env::storage_byte_cost()
+                .as_yoctonear()
+                .checked_mul(bytes_added as u128)
+                .unwrap_or_else(|| env::panic_str("VAULT_ERROR_DEPOSIT_OVERFLOW"));
             let attached_deposit = env::attached_deposit().as_yoctonear();
             
             if attached_deposit < required_deposit {
@@ -264,22 +416,42 @@ impl AegisContract {
             
             let excess = attached_deposit - required_deposit;
             if excess > 0 {
+                // P3-8: Log the Promise before dispatching so it appears in the NEAR receipt log.
+                // If the transfer Promise fails (insufficient balance on the contract account),
+                // the log entry provides an audit trail that the refund was attempted.
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR excess deposit to {}",
+                    excess, caller
+                ));
                 Promise::new(caller).transfer(near_sdk::NearToken::from_yoctonear(excess));
             }
         } else {
             let attached_deposit = env::attached_deposit();
             if attached_deposit.as_yoctonear() > 0 {
+                // P3-8: Log the full refund.
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR full deposit to {} (no storage added)",
+                    attached_deposit.as_yoctonear(), caller
+                ));
                 Promise::new(caller).transfer(attached_deposit);
             }
         }
     }
 
     /// @notice Internal utility to calculate released bytes and refund locked NEAR stake.
-    fn _refund_released_storage(&self, caller: AccountId, initial: u64, final_st: u64) {
-        if initial > final_st {
-            let bytes_freed = initial - final_st;
-            let released_stake = env::storage_byte_cost().as_yoctonear().checked_mul(bytes_freed as u128).unwrap();
+    fn _refund_released_storage(&self, caller: AccountId, bytes_freed: u64) {
+        if bytes_freed > 0 {
+            // MEDIUM-P2-5: checked_mul with explicit panic message.
+            let released_stake = env::storage_byte_cost()
+                .as_yoctonear()
+                .checked_mul(bytes_freed as u128)
+                .unwrap_or_else(|| env::panic_str("VAULT_ERROR_REFUND_OVERFLOW"));
             if released_stake > 0 {
+                // P3-8: Log the storage release refund for auditability.
+                env::log_str(&format!(
+                    "VAULT_REFUND: releasing {} yoctoNEAR storage stake ({} bytes freed) to {}",
+                    released_stake, bytes_freed, caller
+                ));
                 Promise::new(caller).transfer(near_sdk::NearToken::from_yoctonear(released_stake));
             }
         }
@@ -321,7 +493,8 @@ mod tests {
         let mut contract = AegisContract::new();
         
         let slug = "erc4626-standard".to_string();
-        let blob_id = "certified-blob-id-walrus-hash".to_string();
+        // P3-7: Use a valid base58 blob_id (no invalid chars like spaces or slashes, or l, I, 0, O)
+        let blob_id = "CertfedBdBHashBase58Ab".to_string();
         let content_sha256 = "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string();
 
         contract.update_wiki_pointer(slug.clone(), blob_id.clone(), content_sha256.clone());
@@ -329,6 +502,8 @@ mod tests {
         let retrieved = contract.get_wiki_pointer(alice.clone(), slug).expect("Should find pointer");
         assert_eq!(retrieved.blob_id, blob_id);
         assert_eq!(retrieved.content_sha256, content_sha256);
+        // P3-6: Verify version field is set correctly
+        assert_eq!(retrieved.version, 1, "VaultPointer version must be 1");
     }
 
     #[test]
@@ -336,7 +511,7 @@ mod tests {
         let alice: AccountId = "alice.near".parse().unwrap();
         testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
         let mut contract = AegisContract::new();
-        contract.update_wiki_pointer("shared-slug".to_string(), "blob-alice".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
+        contract.update_wiki_pointer("shared-slug".to_string(), "BaceBase58VadXYZabcdef1234".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
 
         // Bob tries to read Alice's data via Bob's identity context
         let bob: AccountId = "bob.near".parse().unwrap();
@@ -347,7 +522,7 @@ mod tests {
 
         // Bob tries to read Alice's pointer by supplying Alice's account ID (allowed since view calls are public)
         let retrieved_as_public = contract.get_wiki_pointer(alice.clone(), "shared-slug".to_string()).unwrap();
-        assert_eq!(retrieved_as_public.blob_id, "blob-alice");
+        assert_eq!(retrieved_as_public.blob_id, "BaceBase58VadXYZabcdef1234");
 
         // Bob tries to delete Alice's pointer
         testing_env!(get_context(bob.clone(), 0));
@@ -359,7 +534,7 @@ mod tests {
         let alice: AccountId = "alice.near".parse().unwrap();
         testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
         let mut contract = AegisContract::new();
-        contract.update_wiki_pointer("shared-slug".to_string(), "blob-alice".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
+        contract.update_wiki_pointer("shared-slug".to_string(), "BaceBase58VadXYZabcdef1234".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
 
         // Bob tries to delete the pointer "shared-slug"
         let bob: AccountId = "bob.near".parse().unwrap();
@@ -393,7 +568,7 @@ mod tests {
         let alice: AccountId = "alice.near".parse().unwrap();
         testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
         let mut contract = AegisContract::new();
-        contract.update_wiki_pointer("slug".to_string(), "blob".to_string(), "short-hash".to_string());
+        contract.update_wiki_pointer("slug".to_string(), "VadBase58B".to_string(), "short-hash".to_string());
     }
 
     #[test]
@@ -402,9 +577,9 @@ mod tests {
         testing_env!(get_context(alice.clone(), 500_000_000_000_000_000_000_000));
         let mut contract = AegisContract::new();
 
-        contract.update_wiki_pointer("slug-1".to_string(), "blob".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
-        contract.update_wiki_pointer("slug-2".to_string(), "blob".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
-        contract.update_wiki_pointer("slug-3".to_string(), "blob".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
+        contract.update_wiki_pointer("slug-1".to_string(), "VadBase58B111111111111111".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
+        contract.update_wiki_pointer("slug-2".to_string(), "VadBase58B222222222222222".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
+        contract.update_wiki_pointer("slug-3".to_string(), "VadBase58B333333333333333".to_string(), "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string());
 
         let list_all = contract.list_wiki_slugs(alice.clone(), 0, 10);
         assert_eq!(list_all.len(), 3);
@@ -418,6 +593,65 @@ mod tests {
 
         let out_of_bounds = contract.list_wiki_slugs(alice.clone(), 10, 2);
         assert!(out_of_bounds.is_empty());
+    }
+
+    /// F-02: Verify that MAX_ENTRIES_PER_USER cap is enforced.
+    /// This test registers MAX_ENTRIES_PER_USER entries and verifies the (MAX+1)th panics.
+    /// NOTE: This test is marked ignore because registering 1000 entries is expensive in a unit test.
+    /// Run with: cargo test test_max_entries_cap -- --ignored
+    #[test]
+    #[ignore]
+    #[should_panic(expected = "VAULT_ERROR_MAX_ENTRIES_REACHED")]
+    fn test_max_entries_cap() {
+        let alice: AccountId = "alice.near".parse().unwrap();
+        testing_env!(get_context(alice.clone(), 999_999_999_999_999_999_999_999_999));
+        let mut contract = AegisContract::new();
+
+        for i in 0..vault::MAX_ENTRIES_PER_USER {
+            let slug = format!("slug-{:04}", i);
+            contract.update_wiki_pointer(
+                slug,
+                "VadBase58BXXXXXXXXXXXXXXX".to_string(),
+                "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
+            );
+        }
+
+        // This (MAX_ENTRIES_PER_USER + 1)th call must panic
+        contract.update_wiki_pointer(
+            "slug-overflow".to_string(),
+            "VadBase58BXXXXXXXXXXXXXXX".to_string(),
+            "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
+        );
+    }
+
+    /// P3-7: Verify that invalid blob_id characters are rejected.
+    #[test]
+    #[should_panic(expected = "VAULT_ERROR_INVALID_BLOB_ID")]
+    fn test_blob_id_invalid_chars_rejected() {
+        let alice: AccountId = "alice.near".parse().unwrap();
+        testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
+        let mut contract = AegisContract::new();
+        // Blob ID with invalid chars: space, slash, 0 (excluded from base58)
+        contract.update_wiki_pointer(
+            "slug".to_string(),
+            "blob/id with spaces 0OIl".to_string(),
+            "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
+        );
+    }
+
+    /// P3-7: Verify base58 alphabet exclusions (0, O, I, l) are rejected.
+    #[test]
+    #[should_panic(expected = "VAULT_ERROR_INVALID_BLOB_ID")]
+    fn test_blob_id_base58_excluded_chars_rejected() {
+        let alice: AccountId = "alice.near".parse().unwrap();
+        testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
+        let mut contract = AegisContract::new();
+        // '0' (zero) is excluded from base58 alphabet
+        contract.update_wiki_pointer(
+            "slug".to_string(),
+            "0InvalidBase58Contains0Zero".to_string(),
+            "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
+        );
     }
 
     #[test]
@@ -446,3 +680,5 @@ mod tests {
         assert!(!p3.is_compliant(&allowed));
     }
 }
+
+

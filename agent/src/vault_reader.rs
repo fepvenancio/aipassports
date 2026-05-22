@@ -101,11 +101,15 @@ fn build_reader_client() -> Result<Client, ReaderError> {
 /// @notice Downloads, validates, decrypts, and asserts SHA-256 integrity for a Walrus blob.
 /// @param master_secret The platform's master secret.
 /// @param near_account_id The owner's unique NEAR account ID.
+/// @param entry_type The category of the vault entry (e.g. "wiki" or "skill").
+/// @param identifier The specific record identifier (e.g. page slug or skill name).
 /// @param blob_id The locator identifier for the blob on Walrus.
 /// @param expected_sha256 The expected SHA-256 hash stored on NEAR (64 lowercase hex chars).
 pub async fn download_and_decrypt(
     master_secret: &[u8; 32],
     near_account_id: &str,
+    entry_type: &str,
+    identifier: &str,
     blob_id: &str,
     expected_sha256: &str,
 ) -> Result<String, ReaderError> {
@@ -146,7 +150,7 @@ pub async fn download_and_decrypt(
     // Zeroizing ensures the DEK bytes are scrubbed from stack/heap when it drops,
     // even on panic or early return. Without this, the DEK remains in memory until
     // the allocator reclaims the page — accessible via core dumps or /proc/mem.
-    let dek = Zeroizing::new(key_derivation::derive_dek(master_secret, near_account_id)?);
+    let dek = Zeroizing::new(key_derivation::derive_dek(master_secret, near_account_id, entry_type, identifier)?);
 
     // 4. Decrypt via AES-256-GCM. Reconstruct [ciphertext][16-byte tag] for standard AEAD decryption
     let nonce = Nonce::from_slice(iv);

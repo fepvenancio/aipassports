@@ -144,24 +144,63 @@ pub fn scan_sensitive_keywords(payload: &str) -> Result<(), FirewallError> {
         ));
     }
 
-    // Step 4: CRITICAL-R5 FIX — reject ASCII control characters.
-    // is_ascii() returns true for ALL bytes 0x00-0x7F, including:
-    //   TAB (0x09), LF (0x0A), CR (0x0D), NULL (0x00), DEL (0x7F)
-    // These were not blocked by the zero-width filter or non-ASCII check.
-    // CONFIRMED BYPASS: "PRIVATE\tKEY" → TAB passes all prior checks → no PRIVATE_KEY match.
-    // FIX: Reject any payload containing ASCII control characters (0x00-0x1F, 0x7F).
-    if normalized.chars().any(|c| c.is_ascii_control()) {
-        return Err(FirewallError::SensitiveContentBlocked(
-            "ASCII_CONTROL_CHAR_SUSPICIOUS".to_string()
-        ));
+    // Step 4: CRITICAL-R5 FIX & Whitespace Normalization
+    // We reject explicitly suspicious non-printable ASCII control characters (such as NULL \0 or DEL 0x7f, or any control characters < 0x20 except \t, \n, \r).
+    // And we normalize all whitespace sequences (\t, \n, \r, and spaces) and underscores (_) into a single space.
+    for c in normalized.chars() {
+        if c.is_ascii_control() && c != '\t' && c != '\n' && c != '\r' {
+            return Err(FirewallError::SensitiveContentBlocked(
+                "ASCII_CONTROL_CHAR_SUSPICIOUS".to_string()
+            ));
+        }
     }
 
-    // Step 5: Uppercase and scan (all chars are now guaranteed printable ASCII)
-    let upper = normalized.to_uppercase();
+    // Collapse whitespace and underscores to spaces
+    let mut collapsed = String::new();
+    let mut last_was_space = false;
+    for c in normalized.chars() {
+        if c.is_whitespace() || c == '_' {
+            if !last_was_space {
+                collapsed.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            collapsed.push(c);
+            last_was_space = false;
+        }
+    }
+
+    // Step 5: Uppercase and scan against space-normalized markers
+    let upper = collapsed.to_uppercase();
     for marker in SENSITIVE_MARKERS {
+        // Match exact original marker
         if upper.contains(marker) {
             return Err(FirewallError::SensitiveContentBlocked(marker.to_string()));
         }
+        // Match space-normalized marker
+        let space_marker = marker.replace('_', " ");
+        if upper.contains(&space_marker) {
+            return Err(FirewallError::SensitiveContentBlocked(marker.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Recursively scans a serde_json::Value for sensitive keywords in all its string fields.
+fn scan_json_strings(val: &Value) -> Result<(), FirewallError> {
+    match val {
+        Value::String(s) => scan_sensitive_keywords(s)?,
+        Value::Array(arr) => {
+            for item in arr {
+                scan_json_strings(item)?;
+            }
+        }
+        Value::Object(obj) => {
+            for (_, value) in obj {
+                scan_json_strings(value)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -174,10 +213,13 @@ pub fn scan_sensitive_keywords(payload: &str) -> Result<(), FirewallError> {
 pub fn transform_outbound_payload(url: &str, raw_body: &str) -> Result<(Value, Vec<(String, String)>), FirewallError> {
     // 1. Structural verification (uses the fixed verify_destination)
     verify_destination(url)?;
-    scan_sensitive_keywords(raw_body)?;
 
+    // Parse the payload first to ensure all unicode escape sequences are decoded before scanning
     let mut body_json: Value = serde_json::from_str(raw_body)
         .map_err(|e| FirewallError::ParseError(e.to_string()))?;
+
+    // Perform recursive string scanning on the decoded structure
+    scan_json_strings(&body_json)?;
 
     let mut headers = Vec::new();
 
@@ -386,6 +428,27 @@ mod tests {
             SENSITIVE_MARKERS.len(),
             required.len(),
             "SENSITIVE_MARKERS has extra entries not in FIREWALL.md spec"
+        );
+    }
+
+    /// Verify that legitimate multi-line user prompts containing newlines are permitted (no DoS).
+    #[test]
+    fn test_legitimate_multiline_prompt_passes() {
+        let multiline = "Explain blockchain technology.\n\nIt is a decentralized ledger that records transactions across a network.";
+        assert!(scan_sensitive_keywords(multiline).is_ok());
+    }
+
+    /// Verify that a unicode-escaped sensitive keyword is successfully decoded and blocked during payload transformation.
+    #[test]
+    fn test_unicode_escaped_keyword_blocked() {
+        let url = "https://api.openai.com/v1/chat/completions";
+        // \u0050\u0052\u0049\u0056\u0041\u0054\u0045\u005f\u004b\u0045\u0059 is "PRIVATE_KEY" in unicode escape
+        let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"What is my \u0050\u0052\u0049\u0056\u0041\u0054\u0045\u005f\u004b\u0045\u0059?"}]}"#;
+        
+        let result = transform_outbound_payload(url, body);
+        assert!(
+            result.is_err(),
+            "Unicode-escaped keyword bypass must be caught and blocked!"
         );
     }
 }

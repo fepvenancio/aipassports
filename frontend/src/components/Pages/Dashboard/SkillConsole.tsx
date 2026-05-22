@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from 'react';
 import { useSkillExecutor } from '../../../hooks/useSkillExecutor';
 import { useSkills } from '../../../hooks/useSkills';
 import { ZdrAlertBanner } from '../../UI/ZdrAlertBanner';
-import { IS_PROD_AGENT } from '../../../api/gateway';
 
 export default function SkillConsole({ nearAccountId }: { nearAccountId: string }) {
   const { skills } = useSkills(nearAccountId);

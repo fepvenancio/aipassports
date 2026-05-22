@@ -34,29 +34,36 @@ const GAS = BigInt('100000000000000');
 const STORAGE_DEPOSIT = BigInt('10000000000000000000000');
 
 let _selector: WalletSelector | null = null;
+let _selectorPromise: Promise<WalletSelector> | null = null;
 let _actionCreators: typeof ActionCreatorsType | null = null;
 
 // ─── Selector (lazy-loaded) ───────────────────────────────────────────────────
 
 async function getSelector(): Promise<WalletSelector> {
   if (_selector) return _selector;
+  if (_selectorPromise) return _selectorPromise;
 
-  // Dynamic import — Vite code-splits these into separate async chunks.
-  // The wallet selector (~400 kB) is not part of the initial JS bundle.
-  const [coreModule, { setupMyNearWallet }] = await Promise.all([
-    import('@near-wallet-selector/core'),
-    import('@near-wallet-selector/my-near-wallet'),
-  ]);
+  _selectorPromise = (async () => {
+    // Dynamic import — Vite code-splits these into separate async chunks.
+    // The wallet selector (~400 kB) is not part of the initial JS bundle.
+    const [coreModule, { setupMyNearWallet }] = await Promise.all([
+      import('@near-wallet-selector/core'),
+      import('@near-wallet-selector/my-near-wallet'),
+    ]);
 
-  const { setupWalletSelector } = coreModule;
-  _actionCreators = coreModule.actionCreators;
+    const { setupWalletSelector } = coreModule;
+    _actionCreators = coreModule.actionCreators;
 
-  _selector = await setupWalletSelector({
-    network: NEAR_NETWORK,
-    modules: [setupMyNearWallet()],
-  });
+    _selector = await setupWalletSelector({
+      network: NEAR_NETWORK,
+      modules: [setupMyNearWallet()],
+    });
 
-  return _selector;
+    _selectorPromise = null;
+    return _selector;
+  })();
+
+  return _selectorPromise;
 }
 
 // ─── Wallet Connect / Disconnect ──────────────────────────────────────────────

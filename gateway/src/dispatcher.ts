@@ -111,7 +111,7 @@ export async function handleVaultWrite(
   env: Env,
   args: Record<string, unknown>,
 ): Promise<McpToolCallResult> {
-  const { nearAccountId, plaintext, epochs } = args;
+  const { nearAccountId, entryType, identifier, plaintext, epochs } = args;
 
   if (typeof nearAccountId !== "string" || typeof plaintext !== "string") {
     return errorResult("INVALID_ARGS", "nearAccountId and plaintext must be strings.");
@@ -123,6 +123,8 @@ export async function handleVaultWrite(
       path: "/vault/write",
       body: {
         nearAccountId,
+        entryType: typeof entryType === "string" ? entryType : "wiki",
+        identifier: typeof identifier === "string" ? identifier : "home",
         plaintext,
         epochs: typeof epochs === "number" ? epochs : 26,
       },
@@ -151,7 +153,7 @@ export async function handleVaultRead(
   env: Env,
   args: Record<string, unknown>,
 ): Promise<McpToolCallResult> {
-  const { nearAccountId, blobId, expectedSha256 } = args;
+  const { nearAccountId, entryType, identifier, blobId, expectedSha256 } = args;
 
   if (
     typeof nearAccountId !== "string" ||
@@ -165,7 +167,13 @@ export async function handleVaultRead(
     const result = await callShadeAgent({
       env,
       path: "/vault/read",
-      body: { nearAccountId, blobId, expectedSha256 },
+      body: {
+        nearAccountId,
+        entryType: typeof entryType === "string" ? entryType : "wiki",
+        identifier: typeof identifier === "string" ? identifier : "home",
+        blobId,
+        expectedSha256,
+      },
     }) as { plaintext: string };
 
     return {
