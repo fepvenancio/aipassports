@@ -13,3 +13,8 @@ build/
 pepper.key
 target/
 backend/target/
+
+# Agent — simulation artefacts (MUST NOT be committed)
+agent/agent.dev.toml
+agent/.secret/
+agent/src/audit_poc_tests.rs

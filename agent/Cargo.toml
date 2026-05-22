@@ -19,4 +19,11 @@ hex = "0.4.3"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 tower-http = { version = "0.5.2", features = ["cors"] }
+tower = { version = "0.4", features = ["util"] }
 thiserror = "1.0.61"
+# C-01: Timing-safe byte comparison for API key validation
+constant_time_eq = "0.3"
+# C-03: Unicode NFKC normalization for ZDR keyword scanner
+unicode-normalization = "0.1"
+# C-02: URL parsing for ZDR destination host/scheme validation
+url = "2"

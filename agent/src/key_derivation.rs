@@ -9,6 +9,8 @@
 
 use std::fs;
 use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use rand::RngCore;
@@ -64,6 +66,15 @@ pub fn load_master_secret() -> Result<[u8; MASTER_SECRET_LEN], KeyError> {
             let mut key = [0u8; MASTER_SECRET_LEN];
             rand::thread_rng().fill_bytes(&mut key);
             fs::write(&secret_path, key).map_err(KeyError::WriteFailed)?;
+            // C-05 FIX: Restrict file to owner-read-only (0o600).
+            // fs::write uses the process umask (typically 0o644 = world-readable).
+            // A world-readable master secret defeats all TEE confidentiality guarantees.
+            #[cfg(unix)]
+            fs::set_permissions(
+                &secret_path,
+                fs::Permissions::from_mode(0o600),
+            )
+            .map_err(KeyError::WriteFailed)?;
             Ok(key)
         }
     } else {
@@ -85,10 +96,23 @@ pub fn load_master_secret() -> Result<[u8; MASTER_SECRET_LEN], KeyError> {
                 Ok(key)
             }
             Err(_) => {
-                // If no sealed key in env, generate a secure ephemeral key for TEE session to allow graceful fallback
-                let mut key = [0u8; MASTER_SECRET_LEN];
-                rand::thread_rng().fill_bytes(&mut key);
-                Ok(key)
+                // C-05 FIX: HARD FAIL in production when TEE_SEALED_KEY is absent.
+                //
+                // The previous behaviour silently generated an ephemeral key, which meant:
+                //   - Agent starts successfully but with a throwaway secret.
+                //   - Every restart produces a NEW key → all previous blobs permanently undecryptable.
+                //   - No warning, no error — silent irreversible data loss.
+                //
+                // Operators MUST inject TEE_SEALED_KEY at deploy time.
+                // For local dev: set TEE_SIMULATION = "true" in agent.dev.toml (gitignored).
+                Err(KeyError::ReadFailed(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "CRITICAL: TEE_SEALED_KEY environment variable not set. \
+                     In production mode the master secret must be injected as a \
+                     TEE-sealed secret. Refusing to start with an ephemeral key \
+                     (silent data loss on restart). \
+                     For local development, use TEE_SIMULATION=true in agent.dev.toml.",
+                )))
             }
         }
     }

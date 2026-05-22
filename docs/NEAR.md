@@ -222,16 +222,28 @@ When users interact via MCP tools (Cursor, Claude Code), the Hono gateway submit
 1. User signs into the dashboard.
 2. Dashboard calls `nearWallet.signIn({ contractId: 'aegis-vault.near', methodNames: [...] })`.
 3. The NEAR wallet prompts the user: "Allow Aegis to call these methods on your behalf?"
-4. User approves — wallet creates the function call access key and registers it on the user's NEAR account.
-5. The wallet stores the corresponding private key in the browser's local storage (NEAR Wallet Selector handles this).
-6. The gateway uses this private key (passed during session establishment) to sign NEAR transactions for MCP calls.
+4. User approves — wallet creates the function call access key and registers the gateway's public key on the user's NEAR account.
+5. Going forward, the **gateway uses `GATEWAY_FUNCKEY_PRIVKEY`** (its own sealed secret, never shared with the client) to sign NEAR transactions for MCP calls on behalf of the user.
 
 ### 7.4 Key Storage in the Gateway
-- During session creation (`/auth/unlock`), the client sends the function call access key private key to the gateway.
-- The gateway encrypts it with its own master key and stores it in Cloudflare KV: `funckey:{nearAccountId}` → encrypted private key.
-- TTL: same as the session TTL (key is purged when session expires).
-- The gateway MUST zero-fill the key from memory immediately after storing to KV.
-- If the session expires and a new one is created, the client MUST re-supply the key.
+
+> **SECURITY NOTE (audit 2026-05-22 — C-06):**  
+> A previous version of this document incorrectly stated that the client sends its function call access key private key to the gateway during `/auth/unlock`. **This is WRONG and MUST NOT be implemented.**  
+> Sending any private key to the gateway would expose it to Cloudflare infrastructure, KV storage, and log systems. The correct model is described below.
+
+**Correct Model — Gateway-generated key pair (see also DEPLOYMENT.md §4.3):**
+
+1. At deployment, the **gateway generates its own Ed25519 key pair** (`GATEWAY_FUNCKEY_PRIVKEY` / `GATEWAY_FUNCKEY_PUBKEY`).
+2. The `GATEWAY_FUNCKEY_PRIVKEY` is injected into the Cloudflare Worker as a **sealed secret** — it never leaves the gateway's runtime.
+3. During dashboard onboarding (`/onboarding/grant-access`), the gateway's **public key** is returned to the client.
+4. The client (browser) signs a NEAR transaction adding the gateway's public key as a function call access key on the user's NEAR account.
+5. From that point on, the **gateway signs NEAR transactions on behalf of the user using its own private key** — and since the function call access key is scoped to the four Aegis methods only, the user's full access key is never shared.
+
+**What this means:**
+- The client sends NO private key to the gateway at any time.
+- `predecessor_account_id()` in the contract is the USER's account ID (NEAR transparently attributes function call key signatures to the delegating account).
+- The gateway's private key is shared across all delegated users — this is an acceptable trade-off documented in the security model (DEPLOYMENT.md §4.3). Compromise of `GATEWAY_FUNCKEY_PRIVKEY` allows mutations on all delegated users' vault indices, so it MUST be treated as a critical secret with rotation procedures.
+- TTL: The function call access key persists until the user explicitly revokes it (not tied to session TTL).
 
 ### 7.5 Key Revocation
 - The user can revoke the function call access key at any time via the NEAR dashboard or CLI.

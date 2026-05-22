@@ -1,4 +1,20 @@
 # IronClaw Manifest for Shade Agent TEE deployment
+#
+# SECURITY: This file is committed to source control.
+# It MUST NOT contain:
+#   - TEE_SIMULATION = "true"   → disables hardware attestation
+#   - http:// Walrus URLs       → plaintext blob transit
+#   - TEE_SEALED_KEY            → master secret
+#
+# Inject all secrets at deploy time via:
+#   ironclaw secret put TEE_SEALED_KEY <hex>
+#   ironclaw secret put WALRUS_PUBLISHER_URL https://...
+#   ironclaw secret put WALRUS_AGGREGATOR_URL https://...
+#   ironclaw secret put IRONCLAW_AGENT_API_KEY <token>
+#
+# For local simulation, copy to agent.dev.toml and add TEE_SIMULATION = "true"
+# (agent.dev.toml is gitignored).
+
 [agent]
 name = "shade-agent"
 version = "0.1.0"
@@ -9,8 +25,7 @@ cpu = 2
 memory = "4Gi"
 
 [env]
-TEE_SIMULATION = "true"
-WALRUS_PUBLISHER_URL = "http://localhost:31600"
-WALRUS_AGGREGATOR_URL = "http://localhost:31601"
-WALRUS_STORAGE_EPOCHS = "5"
+# Epoch count for Walrus blob storage duration (~2 weeks per epoch)
+# Production: override via IronClaw deploy config to 26 (≈ 1 year)
+WALRUS_STORAGE_EPOCHS = "26"
 PORT = "8080"
