@@ -12,3 +12,5 @@ build/
 *.log
 pepper.key
 frontend/
+target/
+backend/target/

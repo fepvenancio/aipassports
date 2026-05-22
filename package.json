@@ -3,26 +3,23 @@
   "version": "2.0.0",
   "type": "module",
   "description": "Sovereign AI Passport — decoupled, provider-agnostic context layer with hardware-enforced zero-trust boundary",
-  "main": "src/main.js",
   "scripts": {
-    "start:stdio": "node src/main.js --transport=stdio",
-    "start:sse": "node src/main.js --transport=sse",
-    "test": "node tests/smoke-test.js && node tests/debounce-validation.js && node tests/firewall-audit.js",
-    "test:smoke": "node tests/smoke-test.js",
-    "test:debounce": "node tests/debounce-validation.js",
-    "test:firewall": "node tests/firewall-audit.js"
+    "test": "pnpm test:backend && pnpm test:frontend",
+    "test:backend": "cargo test --manifest-path backend/Cargo.toml",
+    "test:frontend": "pnpm -C frontend build"
   },
-  "keywords": ["mcp", "ai-passport", "zero-trust", "tee", "sovereign"],
+  "keywords": [
+    "mcp",
+    "ai-passport",
+    "zero-trust",
+    "tee",
+    "sovereign"
+  ],
   "author": "",
   "license": "Apache-2.0",
   "packageManager": "pnpm@10.28.0",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1048.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "ajv": "^8.20.0",
-    "express": "^5.2.1"
-  },
-  "devDependencies": {
-    "@types/express": "^5.0.6"
+    "ajv": "^8.20.0"
   }
 }
