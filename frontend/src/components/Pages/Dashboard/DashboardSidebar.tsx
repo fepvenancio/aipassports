@@ -1,14 +1,14 @@
 import { disconnectWallet } from '../../../near/wallet';
 import type { AuthSession } from '../../../api/types';
+import Button from '../../UI/Button';
 
-// ─── Navigation ───────────────────────────────────────────────────────────────
 export type DashTab = 'wiki' | 'skills' | 'console' | 'settings';
 
 const NAV: Array<{ id: DashTab; icon: string; label: string }> = [
-  { id: 'wiki',     icon: '📄', label: 'Wiki'    },
-  { id: 'skills',  icon: '⚡', label: 'Skills'  },
-  { id: 'console', icon: '⌨',  label: 'Console'  },
-  { id: 'settings',icon: '⚙',  label: 'Settings' },
+  { id: 'wiki',     icon: '📄', label: 'Wiki Pages'   },
+  { id: 'skills',  icon: '⚡', label: 'Skill Registry' },
+  { id: 'console', icon: '⌨️', label: 'Console'      },
+  { id: 'settings',icon: '⚙️', label: 'Settings'     },
 ];
 
 interface Props {
@@ -23,136 +23,95 @@ interface Props {
 export default function DashboardSidebar({
   session, activeTab, collapsed, onTabChange, onToggle, onLock,
 }: Props) {
-  const w = collapsed ? 64 : 224;
-
   async function handleLock() {
     await disconnectWallet();
     onLock();
   }
 
   return (
-    <aside style={{
-      width: w,
-      flexShrink: 0,
-      display: 'flex',
-      flexDirection: 'column',
-      background: 'var(--color-surface)',
-      borderRight: '1px solid var(--color-border)',
-      transition: 'width 0.22s cubic-bezier(0.4,0,0.2,1)',
-      overflow: 'hidden',
-    }}>
+    <aside className={`h-full shrink-0 flex flex-col bg-slate-900 border-r border-slate-800 transition-all duration-300 ${
+      collapsed ? 'w-16' : 'w-56'
+    }`}>
       {/* Logo row */}
-      <div style={{
-        height: 56,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: collapsed ? 'center' : 'space-between',
-        padding: collapsed ? 0 : '0 14px',
-        borderBottom: '1px solid var(--color-border)',
-        flexShrink: 0,
-      }}>
+      <div className={`h-14 flex items-center border-b border-slate-800 shrink-0 ${
+        collapsed ? 'justify-center px-0' : 'justify-between px-4'
+      }`}>
         {!collapsed && (
-          <span style={{ fontSize: 15, fontWeight: 700 }}>
-            <span className="gradient-text">Aegis</span>
+          <span className="text-xs font-bold tracking-wider text-slate-100 uppercase select-none">
+            Aegis <span className="text-cyan-400">Vault</span>
           </span>
         )}
-        <button
-          className="btn btn-ghost btn-icon"
+        <Button
+          variant="outline"
+          size="icon"
           onClick={onToggle}
-          style={{ border: 'none', color: 'var(--color-text-3)', padding: 6 }}
-          title={collapsed ? 'Expand' : 'Collapse'}
+          title={collapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+          className="w-7 h-7 flex items-center justify-center"
         >
-          <span style={{ fontSize: 14 }}>{collapsed ? '▶' : '◀'}</span>
-        </button>
+          <span className="text-[10px] font-mono leading-none select-none">
+            {collapsed ? '→' : '←'}
+          </span>
+        </Button>
       </div>
 
-      {/* Account badge */}
-      <div style={{
-        padding: collapsed ? '10px 0' : '12px 14px',
-        borderBottom: '1px solid var(--color-border)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: collapsed ? 'center' : 'flex-start',
-        gap: 10,
-        flexShrink: 0,
-      }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-          background: 'linear-gradient(135deg, var(--color-accent-dim), var(--color-purple-dim))',
-          border: '1px solid rgba(0,240,255,0.15)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 12, fontWeight: 700, color: 'var(--color-accent)',
-          fontFamily: 'var(--font-mono)',
-        }}>
+      {/* Account Profile Block */}
+      <div className={`flex items-center gap-3 border-b border-slate-800/80 shrink-0 ${
+        collapsed ? 'justify-center py-4 px-0' : 'justify-start py-4 px-4'
+      }`}>
+        <div className="w-8 h-8 rounded-lg shrink-0 bg-slate-950 border border-slate-800 flex items-center justify-center text-xs font-mono font-bold text-cyan-400 select-none shadow-inner">
           N
         </div>
         {!collapsed && (
-          <div style={{ overflow: 'hidden' }}>
-            <div style={{
-              fontSize: 11, fontWeight: 600,
-              color: 'var(--color-text-1)',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              maxWidth: 140,
-            }}>
+          <div className="overflow-hidden">
+            <div className="text-xs font-semibold text-slate-200 truncate max-w-[130px] font-mono leading-none">
               {session.nearAccountId}
             </div>
-            <div style={{ fontSize: 10, color: 'var(--color-accent)', marginTop: 1 }}>
-              <span className="animate-pulse" style={{ marginRight: 4 }}>●</span>
-              Vault Active
+            <div className="text-[9px] text-cyan-400 mt-1 font-mono uppercase tracking-wider flex items-center gap-1 leading-none select-none">
+              <span className="w-1 h-1 rounded-full bg-cyan-400 animate-pulse-dot" />
+              Active
             </div>
           </div>
         )}
       </div>
 
       {/* Nav items */}
-      <nav style={{ flex: 1, padding: '10px 6px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <nav className="flex-grow p-2 flex flex-col gap-1 overflow-y-auto">
         {NAV.map(({ id, icon, label }) => {
           const active = activeTab === id;
           return (
-            <button
+            <Button
               key={id}
               id={`nav-${id}`}
               onClick={() => onTabChange(id)}
-              className="btn btn-ghost"
-              style={{
-                width: '100%',
-                justifyContent: collapsed ? 'center' : 'flex-start',
-                padding: collapsed ? '10px 0' : '9px 12px',
-                gap: 10, fontSize: 13,
-                background: active ? 'var(--color-accent-dim)' : 'transparent',
-                borderColor: active ? 'rgba(0,240,255,0.18)' : 'transparent',
-                color: active ? 'var(--color-accent)' : 'var(--color-text-2)',
-                fontWeight: active ? 600 : 400,
-                borderLeft: active ? '2px solid var(--color-accent)' : '2px solid transparent',
-                borderRadius: active ? '0 var(--radius-md) var(--radius-md) 0' : 'var(--radius-md)',
-                transition: 'all 0.14s',
-              }}
+              variant={active ? 'secondary' : 'ghost'}
+              className={`w-full text-xs shrink-0 ${
+                collapsed ? 'justify-center px-0' : 'justify-start px-3'
+              } ${
+                active ? 'text-cyan-400 font-semibold border-slate-700 bg-slate-950 shadow-inner' : ''
+              }`}
               title={collapsed ? label : undefined}
             >
-              <span style={{ fontSize: 15, flexShrink: 0 }}>{icon}</span>
-              {!collapsed && label}
-            </button>
+              <span className="text-sm shrink-0">{icon}</span>
+              {!collapsed && <span>{label}</span>}
+            </Button>
           );
         })}
       </nav>
 
       {/* Lock */}
-      <div style={{ padding: '10px 6px', borderTop: '1px solid var(--color-border)', flexShrink: 0 }}>
-        <button
+      <div className="p-2 border-t border-slate-800/80 shrink-0">
+        <Button
           id="btn-lock-vault"
-          className="btn btn-alert"
+          variant="destructive"
           onClick={handleLock}
-          style={{
-            width: '100%',
-            justifyContent: collapsed ? 'center' : 'flex-start',
-            padding: collapsed ? '10px 0' : '9px 12px',
-            gap: 10, fontSize: 13, borderColor: 'transparent',
-          }}
+          className={`w-full text-xs font-semibold ${
+            collapsed ? 'justify-center px-0' : 'justify-start px-3'
+          }`}
           title={collapsed ? 'Lock Vault' : undefined}
         >
-          <span style={{ fontSize: 15 }}>🔒</span>
-          {!collapsed && 'Lock Vault'}
-        </button>
+          <span className="text-sm shrink-0">🔒</span>
+          {!collapsed && <span>Lock Vault</span>}
+        </Button>
       </div>
     </aside>
   );

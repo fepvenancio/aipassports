@@ -46,9 +46,10 @@ async function getSelector(): Promise<WalletSelector> {
   _selectorPromise = (async () => {
     // Dynamic import — Vite code-splits these into separate async chunks.
     // The wallet selector (~400 kB) is not part of the initial JS bundle.
-    const [coreModule, { setupMyNearWallet }] = await Promise.all([
+    const [coreModule, { setupMyNearWallet }, { setupSender }] = await Promise.all([
       import('@near-wallet-selector/core'),
       import('@near-wallet-selector/my-near-wallet'),
+      import('@near-wallet-selector/sender'),
     ]);
 
     const { setupWalletSelector } = coreModule;
@@ -56,7 +57,10 @@ async function getSelector(): Promise<WalletSelector> {
 
     _selector = await setupWalletSelector({
       network: NEAR_NETWORK,
-      modules: [setupMyNearWallet()],
+      modules: [
+        setupMyNearWallet(),
+        setupSender(),
+      ],
     });
 
     _selectorPromise = null;

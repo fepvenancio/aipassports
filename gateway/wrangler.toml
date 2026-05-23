@@ -9,7 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Non-sensitive defaults (overridden by secrets in production).
-# IRONCLAW_AGENT_BASE_URL defaults to the Azure ACI enclave endpoint.
+# IRONCLAW_AGENT_BASE_URL defaults to the production Shade Agent enclave endpoint.
 # Override locally with: wrangler dev --var IRONCLAW_AGENT_BASE_URL:http://localhost:8080
 IRONCLAW_AGENT_BASE_URL = "https://api.aipassports.xyz"
 
@@ -19,8 +19,8 @@ globs = ["**/*.ts"]
 
 [[kv_namespaces]]
 binding = "CHALLENGES_KV"
-id = "CHALLENGES_KV_PLACEHOLDER"
+id = "ab73bb8bd9a3486db0d713c3a8c7ad1b"
 
 [[kv_namespaces]]
 binding = "SESSIONS_KV"
-id = "SESSIONS_KV_PLACEHOLDER"
+id = "1905df2470e04bceb31a2da1414aca5b"

@@ -2,6 +2,11 @@ import { useState } from 'react';
 import { useSkills } from '../../../hooks/useSkills';
 import { SkeletonCard } from '../../UI/CustomSkeleton';
 import type { SkillConfig, SkillEntry } from '../../../api/types';
+import { Card, CardHeader, CardTitle } from '../../UI/Card';
+import Button from '../../UI/Button';
+import Input from '../../UI/Input';
+import Select from '../../UI/Select';
+import Badge from '../../UI/Badge';
 
 const EMPTY_FORM: SkillConfig = { name: '', description: '', provider: 'openai', model: 'gpt-4o' };
 
@@ -18,116 +23,141 @@ export default function SkillsPanel({ nearAccountId }: { nearAccountId: string }
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 18 }}>
-
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+    <div className="h-full flex flex-col gap-5 overflow-hidden animate-fade-in pr-1.5 pb-2">
+      
+      {/* Panel Header */}
+      <div className="flex items-start justify-between shrink-0">
         <div>
-          <h2 style={{ margin: '0 0 4px', fontSize: 15, fontWeight: 600 }}>Skill Registry</h2>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-3)' }}>
-            LLM tools encrypted as Walrus blobs, indexed on NEAR
+          <h2 className="text-sm font-semibold text-slate-100">Skill Registry</h2>
+          <p className="text-xs text-slate-400 mt-0.5 font-sans">
+            Encrypted tools stored as Walrus blobs and registered in the NEAR contract index.
           </p>
         </div>
-        <button className="btn btn-accent btn-sm" onClick={() => setShowForm((v) => !v)} disabled={status === 'registering'}>
+        <Button
+          variant={showForm ? 'outline' : 'default'}
+          size="sm"
+          onClick={() => setShowForm((v) => !v)}
+          disabled={status === 'registering'}
+        >
           {showForm ? '✕ Cancel' : '+ Register Skill'}
-        </button>
+        </Button>
       </div>
 
-      {/* Error */}
+      {/* Error Panel */}
       {status === 'error' && errorMessage && (
-        <div className="animate-fade-in" style={{ background: 'var(--color-alert-dim)', border: '1px solid rgba(255,59,92,0.2)', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: 'var(--color-alert)', fontFamily: 'var(--font-mono)' }}>
-          {errorMessage}
+        <div className="bg-rose-950/20 border border-rose-900/30 rounded-lg px-4 py-2.5 text-xs text-rose-400 font-mono animate-fade-in shrink-0">
+          ⚠ {errorMessage}
         </div>
       )}
 
-      {/* Registration form */}
+      {/* Registration Form */}
       {showForm && (
-        <form onSubmit={handleRegister} className="glass animate-fade-in" style={{ borderRadius: 12, padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--color-accent)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-            Register New Skill
-          </div>
+        <Card className="p-5 md:p-6 flex flex-col gap-4 animate-fade-in shrink-0 shadow-md">
+          <CardHeader className="p-0 border-b-0 bg-transparent flex items-start shrink-0">
+            <CardTitle>REGISTER NEW SKILL</CardTitle>
+          </CardHeader>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <form onSubmit={handleRegister} className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">SKILL ID *</label>
+                <Input
+                  id="input-skill-id"
+                  type="text"
+                  mono
+                  placeholder="security-scanner"
+                  value={form.id}
+                  onChange={(e) => setForm({ ...form, id: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') })}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">DISPLAY NAME *</label>
+                <Input
+                  id="input-skill-name"
+                  type="text"
+                  placeholder="Security Scanner"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">LLM PROVIDER</label>
+                <Select
+                  value={form.provider}
+                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Google Gemini</option>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">MODEL</label>
+                <Input
+                  type="text"
+                  mono
+                  placeholder="gpt-4o"
+                  value={form.model}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                />
+              </div>
+            </div>
+
             <div>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 5 }}>Skill ID *</label>
-              <input
-                id="input-skill-id"
-                className="input input-mono"
-                placeholder="security-scanner"
-                value={form.id}
-                onChange={(e) => setForm({ ...form, id: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') })}
+              <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">SYSTEM PROMPT / DESCRIPTION *</label>
+              <textarea
+                id="input-skill-description"
+                className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-500/50 text-slate-100 rounded-lg px-3 py-2 text-xs font-mono outline-none transition-all resize-none min-h-[80px]"
+                placeholder="Audit Solidity contracts for reentrancy, access control, and integer overflow vulnerabilities..."
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
                 required
               />
             </div>
-            <div>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 5 }}>Display Name *</label>
-              <input
-                id="input-skill-name"
-                className="input"
-                placeholder="Security Scanner"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                required
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 5 }}>Provider</label>
-              <select
-                className="input"
-                value={form.provider}
-                onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                style={{ cursor: 'pointer' }}
+
+            <div className="flex justify-end gap-2 shrink-0">
+              <Button type="button" variant="outline" size="sm" onClick={() => setShowForm(false)}>
+                Cancel
+              </Button>
+              <Button
+                id="btn-submit-skill"
+                type="submit"
+                variant="default"
+                size="sm"
+                disabled={status === 'registering'}
               >
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="gemini">Google Gemini</option>
-              </select>
+                {status === 'registering' ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-3.5 h-3.5 rounded-full border border-slate-950/20 border-t-slate-950 animate-spin" />
+                    Registering...
+                  </span>
+                ) : (
+                  'Register Skill'
+                )}
+              </Button>
             </div>
-            <div>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 5 }}>Model</label>
-              <input
-                className="input input-mono"
-                placeholder="gpt-4o"
-                value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 5 }}>Description / System Prompt *</label>
-            <textarea
-              id="input-skill-description"
-              className="input textarea input-mono"
-              placeholder="Audit Solidity contracts for reentrancy, access control, and integer overflow vulnerabilities…"
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              required
-              style={{ minHeight: 90 }}
-            />
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowForm(false)}>Cancel</button>
-            <button id="btn-submit-skill" type="submit" className="btn btn-accent btn-sm" disabled={status === 'registering'}>
-              {status === 'registering' ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5, borderTopColor: '#03040a', borderColor: 'rgba(0,0,0,0.2)' }} /> Registering…</> : 'Register'}
-            </button>
-          </div>
-        </form>
+          </form>
+        </Card>
       )}
 
-      {/* Grid */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      {/* Grid Container */}
+      <div className="flex-1 overflow-y-auto pr-1">
         {status === 'fetching' ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px,1fr))', gap: 16 }}>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 animate-fade-in">
             {Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={i} />)}
           </div>
         ) : skills.length === 0 ? (
           <EmptySkills onAdd={() => setShowForm(true)} />
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px,1fr))', gap: 16 }}>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {skills.map((skill) => (
-              <SkillCard key={skill.id} skill={skill} onRemove={() => { if (confirm(`Remove skill "${skill.id}"?`)) removeSkill(skill.id); }} />
+              <SkillCard
+                key={skill.id}
+                skill={skill}
+                onRemove={() => { if (confirm(`Remove skill "${skill.id}"?`)) removeSkill(skill.id); }}
+              />
             ))}
           </div>
         )}
@@ -138,66 +168,80 @@ export default function SkillsPanel({ nearAccountId }: { nearAccountId: string }
 
 function SkillCard({ skill, onRemove }: { skill: SkillEntry; onRemove: () => void }) {
   return (
-    <div
-      className="glass animate-fade-in"
-      style={{ borderRadius: 12, padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12, transition: 'border-color 0.15s' }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(0,240,255,0.2)'; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--color-border)'; }}
-    >
-      {/* Card header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-        <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, background: 'var(--color-primary)', border: '1px solid rgba(0,240,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>
+    <Card className="flex flex-col gap-3.5 p-5 animate-fade-in hover:border-slate-700/80 transition-all duration-150 group">
+      {/* Card Header */}
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-center text-sm shrink-0 shadow-inner">
           ⚡
         </div>
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div className="flex-grow overflow-hidden">
+          <div className="text-xs font-semibold text-slate-200 truncate group-hover:text-slate-100 transition-colors">
             {skill.config?.name ?? skill.id}
           </div>
-          <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--color-text-3)', marginTop: 1 }}>
+          <div className="text-[10px] font-mono text-slate-500 truncate mt-0.5">
             {skill.id}
           </div>
         </div>
-        <span className="badge badge-accent" style={{ flexShrink: 0 }}>Active</span>
+        <Badge variant="default" className="shrink-0 font-bold text-[9px] px-2 py-0.5">
+          ACTIVE
+        </Badge>
       </div>
 
       {/* Description */}
       {skill.config?.description && (
-        <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-2)', lineHeight: 1.55 }}>
-          {skill.config.description.length > 120 ? skill.config.description.slice(0, 120) + '…' : skill.config.description}
+        <p className="text-xs text-slate-400 leading-relaxed break-words line-clamp-3">
+          {skill.config.description}
         </p>
       )}
 
-      {/* TEE schema */}
+      {/* Meta tags */}
       {skill.config && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {skill.config.provider && <span className="badge badge-navy" style={{ fontFamily: 'var(--font-mono)' }}>{skill.config.provider}</span>}
-          {skill.config.model && <span className="badge badge-navy" style={{ fontFamily: 'var(--font-mono)' }}>{skill.config.model}</span>}
+        <div className="flex gap-1.5 flex-wrap">
+          {skill.config.provider && (
+            <Badge variant="secondary" className="px-2 py-0.5 text-[9px]">
+              {skill.config.provider}
+            </Badge>
+          )}
+          {skill.config.model && (
+            <Badge variant="secondary" className="px-2 py-0.5 text-[9px]">
+              {skill.config.model}
+            </Badge>
+          )}
         </div>
       )}
 
-      {/* Pointer */}
+      {/* Pointer locator */}
       {skill.pointer && (
-        <div style={{ padding: '7px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-3)' }}>
-          blob: {skill.pointer.blob_id.slice(0, 22)}…
+        <div className="px-3 py-1.5 bg-slate-950 border border-slate-800/40 rounded-lg font-mono text-[9px] text-slate-500 break-all select-none leading-normal">
+          blob: {skill.pointer.blob_id.slice(0, 24)}...
         </div>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <button className="btn btn-alert btn-xs" onClick={onRemove}>Remove</button>
+      {/* Actions */}
+      <div className="flex justify-end shrink-0 pt-1">
+        <Button
+          variant="destructive"
+          size="xs"
+          onClick={onRemove}
+        >
+          Remove
+        </Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
 function EmptySkills({ onAdd }: { onAdd: () => void }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 280, gap: 14, color: 'var(--color-text-3)' }}>
-      <div style={{ fontSize: 46 }}>⚡</div>
-      <div style={{ textAlign: 'center' }}>
-        <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500 }}>No skills registered</p>
-        <p style={{ margin: 0, fontSize: 12 }}>Register custom LLM tools to extend your AI context</p>
+    <div className="flex flex-col items-center justify-center gap-4 text-slate-500 select-none py-20">
+      <span className="text-5xl">⚡</span>
+      <div className="text-center flex flex-col gap-1">
+        <p className="text-xs font-semibold text-slate-400">No skills registered</p>
+        <p className="text-[11px] text-slate-500">Register custom LLM prompt environments to expand your memory skills</p>
       </div>
-      <button className="btn btn-ghost btn-sm" onClick={onAdd}>+ Register First Skill</button>
+      <Button variant="outline" size="sm" onClick={onAdd}>
+        + Register First Skill
+      </Button>
     </div>
   );
 }

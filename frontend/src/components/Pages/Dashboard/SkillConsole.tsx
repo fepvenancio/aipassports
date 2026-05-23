@@ -2,6 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import { useSkillExecutor } from '../../../hooks/useSkillExecutor';
 import { useSkills } from '../../../hooks/useSkills';
 import { ZdrAlertBanner } from '../../UI/ZdrAlertBanner';
+import { Card, CardHeader, CardTitle, CardContent } from '../../UI/Card';
+import Button from '../../UI/Button';
+import Select from '../../UI/Select';
+import Badge from '../../UI/Badge';
 
 export default function SkillConsole({ nearAccountId }: { nearAccountId: string }) {
   const { skills } = useSkills(nearAccountId);
@@ -33,196 +37,188 @@ export default function SkillConsole({ nearAccountId }: { nearAccountId: string 
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 0 }}>
+    <div className="h-full flex flex-col gap-0 overflow-hidden animate-fade-in pr-1">
 
-      {/* Console title bar */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12, padding: '0 0 16px',
-        borderBottom: '1px solid var(--color-border)', marginBottom: 16, flexShrink: 0,
-      }}>
+      {/* Header bar */}
+      <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4 shrink-0 gap-4">
         <div>
-          <h2 style={{ margin: '0 0 3px', fontSize: 15, fontWeight: 600 }}>Execution Console</h2>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-3)' }}>
-            Run registered skills through the IronClaw TEE · ZDR enforced at agent boundary
+          <h2 className="text-sm font-semibold text-slate-100">Execution Console</h2>
+          <p className="text-xs text-slate-400 mt-0.5 font-sans">
+            Run registered prompt environments inside the secure IronClaw TEE, protected by ZDR audits.
           </p>
         </div>
-        <div style={{ flex: 1 }} />
         {(state.status === 'completed' || state.status === 'error') && (
-          <button className="btn btn-ghost btn-sm" onClick={reset}>Clear</button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={reset}
+            className="shrink-0"
+          >
+            Clear Output
+          </Button>
         )}
       </div>
 
-      {/* Dual-column workspace */}
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, minHeight: 0 }}>
+      {/* Workspace Split */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0 pb-2">
 
-        {/* ── LEFT: Input ────────────────────────────────────────────────── */}
-        <div className="glass" style={{ borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* ── LEFT COLUMN: Input Control Panel ───────────────────────────── */}
+        <Card className="flex flex-col overflow-hidden">
+          {/* Header */}
+          <CardHeader className="py-2.5">
+            <CardTitle>SKILL RUNNER</CardTitle>
+          </CardHeader>
 
-          {/* Panel header */}
-          <div style={{ padding: '11px 16px', borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
-            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--color-text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-              SKILL INPUT
-            </span>
-          </div>
-
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 14, padding: 16, overflowY: 'auto' }}>
-
-            {/* Skill selector */}
+          <CardContent className="flex-grow overflow-y-auto p-4 flex flex-col gap-4">
+            {/* Selector */}
             <div>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)', marginBottom: 6 }}>Select Skill</label>
+              <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 font-mono">SELECT REGISTERED SKILL</label>
               {skills.length === 0 ? (
-                <div style={{ fontSize: 12, color: 'var(--color-text-3)', padding: '8px 0' }}>
-                  No skills registered. Go to the Skills tab first.
+                <div className="text-xs text-slate-500 font-mono py-1">
+                  No skills registered. Please register a skill first.
                 </div>
               ) : (
-                <select
+                <Select
                   id="select-skill"
-                  className="input input-mono"
+                  mono
                   value={skillId}
                   onChange={(e) => setSkillId(e.target.value)}
-                  style={{ cursor: 'pointer' }}
                 >
                   {skills.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.config?.name ?? s.id}
+                      {s.config?.name ?? s.id} ({s.id})
                     </option>
                   ))}
-                </select>
+                </Select>
               )}
             </div>
 
-            {/* Prompt input with real-time ZDR scanning */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ display: 'block', fontSize: 11, color: 'var(--color-text-3)' }}>
-                Prompt
+            {/* Prompt input */}
+            <div className="flex-1 flex flex-col gap-1.5 min-h-[140px]">
+              <label className="block text-[10px] font-semibold text-slate-400 flex items-center justify-between font-mono">
+                <span>PROMPT INPUT</span>
                 {isBlocked && (
-                  <span className="badge badge-alert" style={{ marginLeft: 8 }}>ZDR BLOCKED</span>
+                  <Badge variant="destructive" className="font-bold text-[9px] px-2 py-0.5">
+                    ZDR BLOCKED
+                  </Badge>
                 )}
               </label>
               <textarea
                 id="console-prompt-input"
-                className={`input textarea input-mono ${isBlocked ? 'zdr-active' : ''}`}
+                className={`flex-grow w-full bg-slate-950 border text-slate-100 rounded-lg px-3 py-2 text-xs font-mono outline-none transition-all resize-none leading-relaxed ${
+                  isBlocked
+                    ? 'border-rose-500 focus:border-rose-500'
+                    : 'border-slate-800 focus:border-cyan-500/50'
+                }`}
                 value={prompt}
                 onChange={(e) => handlePromptChange(e.target.value)}
-                placeholder={`Enter your prompt here…\n\nThe ZDR Firewall scans every keystroke.\nSensitive markers (PRIVATE_KEY, MNEMONIC, etc.) are blocked immediately.`}
-                style={{ flex: 1, resize: 'none', minHeight: 160, fontSize: 12, lineHeight: 1.7 }}
+                placeholder={`Enter prompt input...\n\nThe Zero Data Retention (ZDR) firewall scans prompts in real-time. Private key patterns or seed phrases are blocked instantly.`}
                 disabled={isExecuting}
               />
             </div>
 
-            {/* ZDR Alert Banner — shows when marker detected */}
+            {/* ZDR alert banner */}
             <ZdrAlertBanner
               marker={state.zdrMarker}
               serverSide={state.status === 'error' && Boolean(state.zdrMarker)}
               onDismiss={state.status === 'zdr-blocked' ? reset : undefined}
             />
 
-
-            {/* Execute button */}
-            <button
+            {/* Execute Button */}
+            <Button
               id="btn-execute-skill"
-              className="btn btn-accent"
-              style={{ width: '100%', padding: 12, fontSize: 13, fontWeight: 600, justifyContent: 'center' }}
+              variant="default"
               onClick={handleExecute}
               disabled={!canExecute}
+              className="w-full py-2.5 font-semibold shadow-inner"
             >
-              {isExecuting
-                ? <><span className="spinner" style={{ borderTopColor: '#03040a', borderColor: 'rgba(0,0,0,0.2)' }} /> Executing in TEE…</>
-                : isBlocked
-                  ? '⛔ Blocked by ZDR Firewall'
-                  : '▶ Execute Skill'}
-            </button>
-          </div>
-        </div>
+              {isExecuting ? (
+                <>
+                  <span className="w-3.5 h-3.5 rounded-full border border-slate-950/20 border-t-slate-950 animate-spin" />
+                  Executing inside TEE Enclave...
+                </>
+              ) : isBlocked ? (
+                '⛔ Firewall Block Active'
+              ) : (
+                '▶ Run Enclave Task'
+              )}
+            </Button>
+          </CardContent>
+        </Card>
 
-        {/* ── RIGHT: Terminal output ─────────────────────────────────────── */}
-        <div
-          className="terminal-scanline"
-          style={{
-            borderRadius: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            background: '#02030a',
-            border: `1px solid ${isBlocked ? 'rgba(255,59,92,0.35)' : 'rgba(0,240,255,0.12)'}`,
-            boxShadow: isBlocked ? '0 0 24px rgba(255,59,92,0.08)' : '0 0 20px rgba(0,240,255,0.05)',
-            transition: 'border-color 0.3s, box-shadow 0.3s',
-            position: 'relative',
-          }}
-        >
-          {/* Terminal title bar */}
-          <div style={{
-            padding: '9px 14px',
-            borderBottom: `1px solid ${isBlocked ? 'rgba(255,59,92,0.2)' : 'rgba(0,240,255,0.1)'}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            flexShrink: 0, background: 'rgba(0,240,255,0.02)',
-          }}>
-            <span style={{
-              fontSize: 10, fontWeight: 700, fontFamily: 'var(--font-mono)', letterSpacing: '0.12em',
-              color: isBlocked ? 'var(--color-alert)' : 'var(--color-accent)',
-            }}>
-              {isBlocked ? '⛔ ZDR FIREWALL — BLOCKED' : '⌨ ENCLAVE OUTPUT'}
-            </span>
-            {/* macOS traffic lights */}
-            <div style={{ display: 'flex', gap: 5 }}>
-              {['#ff5f56', '#ffbd2e', '#27c93f'].map((c) => (
-                <div key={c} style={{ width: 8, height: 8, borderRadius: 99, background: c }} />
+        {/* ── RIGHT COLUMN: Classic Terminal Output ───────────────────────── */}
+        <div className={`bg-slate-950 border rounded-xl flex flex-col overflow-hidden shadow-inner transition-all duration-300 relative ${
+          isBlocked ? 'border-rose-900/60 shadow-rose-950/5' : 'border-slate-800/80 shadow-slate-950/10'
+        }`}>
+          {/* Header */}
+          <div className={`px-4 py-2 border-b flex items-center justify-between shrink-0 select-none ${
+            isBlocked ? 'bg-rose-950/10 border-rose-900/40' : 'bg-slate-900/30 border-slate-800/60'
+          }`}>
+            <Badge
+              variant={isBlocked ? 'destructive' : 'default'}
+              className="font-bold text-[9px] px-2.5 py-0.5"
+            >
+              {isBlocked ? 'ZDR INTERCEPT ACTIVE' : 'SECURE ENCLAVE OUTPUT'}
+            </Badge>
+            {/* macOS traffic lights styling */}
+            <div className="flex gap-1.5">
+              {['bg-rose-500', 'bg-amber-500', 'bg-emerald-500'].map((c) => (
+                <div key={c} className={`w-2 h-2 rounded-full ${c} opacity-75`} />
               ))}
             </div>
           </div>
 
-          {/* Output body */}
+          {/* Terminal Logs Body */}
           <div
             ref={outputRef}
-            style={{ flex: 1, overflowY: 'auto', padding: '18px 20px', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.85 }}
+            className="flex-grow overflow-y-auto p-5 font-mono text-xs leading-relaxed text-slate-300"
           >
             {state.status === 'idle' && (
-              <span style={{ color: 'var(--color-text-3)' }}>
-                $ aegis-tee ready<br />
-                $ awaiting skill execution<span className="terminal-cursor" />
+              <span className="text-slate-500">
+                $ aegis-enclave init ok<br />
+                $ awaiting pipeline invocation...<span className="terminal-cursor" />
               </span>
             )}
 
             {state.status === 'executing' && (
-              <div style={{ color: 'var(--color-accent)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div>$ executing skill: <strong>{skillId}</strong></div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
-                  Processing inside TEE enclave…
+              <div className="text-cyan-400 flex flex-col gap-2">
+                <div>$ aegis-enclave run --skill={skillId}</div>
+                <div className="flex items-center gap-2 text-slate-400">
+                  <span className="w-3.5 h-3.5 rounded-full border border-slate-800 border-t-cyan-400 animate-spin" />
+                  Decrypting payload & executing inference inside enclaved memory...
                 </div>
               </div>
             )}
 
             {state.status === 'completed' && state.output && (
               <div className="animate-fade-in">
-                <div style={{ color: 'var(--color-text-3)', fontSize: 11, marginBottom: 10 }}>
-                  $ skill={skillId} status=completed
+                <div className="text-slate-500 text-[10px] mb-2 font-semibold">
+                  $ exit_code=0 status=completed
                 </div>
-                <div style={{ color: 'var(--color-accent)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <div className="text-cyan-300 whitespace-pre-wrap break-all leading-relaxed bg-slate-900/40 border border-slate-800/40 rounded-lg p-3">
                   {state.output}
                 </div>
-                <div style={{ color: 'var(--color-text-3)', marginTop: 10, fontSize: 11 }}>
-                  $ exit 0<span className="terminal-cursor" />
+                <div className="text-slate-500 mt-3">
+                  $ ready<span className="terminal-cursor" />
                 </div>
               </div>
             )}
 
             {isBlocked && (
-              <div className="animate-fade-in" style={{ color: 'var(--color-alert)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div>$ zdr-firewall: PAYLOAD INTERCEPTED</div>
-                {state.zdrMarker && <div>$ marker detected: <strong>{state.zdrMarker}</strong></div>}
-                <div>$ action: TRANSMISSION BLOCKED</div>
-                <div style={{ marginTop: 8, color: 'rgba(255,59,92,0.6)', fontSize: 11, lineHeight: 1.6 }}>
-                  Remove the sensitive content from your prompt.<br />
-                  Zero Data Retention enforced. FIREWALL.md §2
+              <div className="animate-fade-in text-rose-400 flex flex-col gap-2.5">
+                <div className="font-bold">$ zdr-firewall: POLICY EXCLUSION DETECTED</div>
+                {state.zdrMarker && <div>$ sensitive token key category: <strong>{state.zdrMarker}</strong></div>}
+                <div>$ action: EGRESS DENIED & TRANSIENT MEMORY SHREDDED</div>
+                <div className="mt-2 text-rose-400/60 leading-relaxed text-[11px]">
+                  Outbound pipeline aborted. Prompts containing cryptographically sensitive credentials cannot be dispatched to public LLM services.
                 </div>
               </div>
             )}
 
             {state.status === 'error' && (
-              <div className="animate-fade-in" style={{ color: 'var(--color-alert)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div>$ error: {state.errorMessage}</div>
-                <div style={{ color: 'var(--color-text-3)', fontSize: 11 }}>$ exit 1</div>
+              <div className="animate-fade-in text-rose-400 flex flex-col gap-1.5">
+                <div>$ task failed: {state.errorMessage}</div>
+                <div className="text-slate-500">$ exit_code=1</div>
               </div>
             )}
           </div>

@@ -18,7 +18,7 @@
  *       │  POST /vault/read | /vault/write | /skills/execute
  *       │  Authorization: Bearer <IRONCLAW_AGENT_API_KEY>
  *       ▼
- *   [IronClaw Shade Agent — Rust/Axum inside Azure ACI Confidential TEE]
+ *   [IronClaw Shade Agent — Rust/Axum inside NEAR TEE Network (Intel TDX / AMD SEV-SNP)]
  *
  * Transport: HTTP (not SSE).
  * Rationale: Cloudflare Workers cannot hold SSE connections without Durable

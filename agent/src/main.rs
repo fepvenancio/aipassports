@@ -278,18 +278,18 @@ async fn require_api_key(
 ///      inside a recognised confidential-computing TEE.
 ///
 /// Detected platforms:
-///   - `AzureConfidentialContainer` — `/dev/sev` present (Azure ACI Confidential / AMD SEV-SNP).
-///   - `SevGuest`                   — `/sys/kernel/security/sev-guest` present (bare-metal SEV).
-///   - `Unknown`                    — no known TEE device node found; likely dev / staging.
+///   - `IntelTdxEnclave` — `/dev/tdx_guest` or `/sys/kernel/security/tdx` present (Intel TDX — NEAR TEE native).
+///   - `AmdSevEnclave`   — `/dev/sev` or `/sys/kernel/security/sev-guest` present (AMD SEV-SNP).
+///   - `Unknown`         — no known TEE device node found; likely dev / staging.
 ///
 /// This does NOT constitute cryptographic attestation. It is a best-effort hint
 /// for diagnostic purposes only. Callers MUST NOT trust this result as proof of
-/// confidential execution — only a valid DCAP TDX Quote from `/attest` constitutes proof.
+/// confidential execution — only a valid DCAP TDX/SNP Quote from `/attest` constitutes proof.
 fn detect_tee_platform() -> &'static str {
-    if std::path::Path::new("/dev/sev").exists() {
-        "AzureConfidentialContainer"
-    } else if std::path::Path::new("/sys/kernel/security/sev-guest").exists() {
-        "SevGuest"
+    if std::path::Path::new("/dev/tdx_guest").exists() || std::path::Path::new("/sys/kernel/security/tdx").exists() {
+        "IntelTdxEnclave"
+    } else if std::path::Path::new("/dev/sev").exists() || std::path::Path::new("/sys/kernel/security/sev-guest").exists() {
+        "AmdSevEnclave"
     } else {
         "Unknown"
     }
@@ -300,7 +300,7 @@ fn detect_tee_platform() -> &'static str {
 /// `attestationStatus` values (machine-readable for adapters):
 ///   - `TEE_DETECTED_QUOTE_PENDING`  — TEE hardware found; DCAP wiring (C-04) incomplete.
 ///   - `TEE_NOT_DETECTED`            — No TEE device node found; dev/staging environment.
-///   - `ATTESTED`                    — (Future) Full verifiable TDX Quote returned in `tdxQuote`.
+///   - `ATTESTED`                    — (Future) Full verifiable Quote returned in `tdxQuote`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AttestResponse {
@@ -317,7 +317,7 @@ struct AttestResponse {
 /// @notice TEE attestation endpoint.
 /// @dev Returns a structured attestation report.
 ///
-///      C-04 STATUS: PENDING — DCAP TDX Quote generation not yet wired.
+///      C-04 STATUS: PENDING — DCAP Quote generation not yet wired.
 ///
 ///      This endpoint performs runtime TEE platform detection and returns a
 ///      machine-readable `attestationStatus` field so adapters (Skill Pack,
@@ -326,7 +326,7 @@ struct AttestResponse {
 ///        - `TEE_DETECTED_QUOTE_PENDING`  → Hardware TEE found; C-04 not yet closed.
 ///        - `TEE_NOT_DETECTED`            → Dev/staging; no enclave hardware present.
 ///
-///      Both statuses return HTTP 503 until C-04 ships a real TDX Quote.
+///      Both statuses return HTTP 503 until C-04 ships a real Quote.
 ///      Adapters MUST NOT claim TEE-verified security until status is `ATTESTED`.
 ///
 ///      Integration guide: see `docs/DCAP_INTEGRATION.md`.
@@ -337,7 +337,7 @@ async fn attest_handler() -> impl IntoResponse {
         (
             "TEE_NOT_DETECTED",
             "No TEE device node found. Running in dev/staging mode. \
-             DCAP attestation requires Azure ACI Confidential or bare-metal AMD SEV-SNP.",
+             DCAP attestation requires an Intel TDX or AMD SEV-SNP hardware enclave.",
         )
     } else {
         (

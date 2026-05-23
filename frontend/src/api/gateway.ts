@@ -16,7 +16,28 @@
 //   NEW-01       — agentPost() accepts an AbortSignal for cancellation/cleanup.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const RAW_AGENT_URL = (import.meta.env.VITE_AGENT_URL as string | undefined) ?? '/api';
+// Read custom agent URL from localStorage if set, else fallback to Vite environment default
+export function getAgentBase(): string {
+  const custom = localStorage.getItem('AEGIS_CUSTOM_AGENT_URL');
+  if (custom) {
+    return validateAndResolveAgentBase(custom);
+  }
+  // In development, route to proxy. In production, connect directly to the live secure enclave.
+  const defaultUrl = import.meta.env.DEV ? '/api' : 'https://api.aipassports.xyz';
+  const raw = (import.meta.env.VITE_AGENT_URL as string | undefined) ?? defaultUrl;
+  return validateAndResolveAgentBase(raw);
+}
+
+// Write or remove custom agent URL in localStorage
+export function setCustomAgentUrl(url: string | null): void {
+  if (url) {
+    // Validate first before storing
+    validateAndResolveAgentBase(url);
+    localStorage.setItem('AEGIS_CUSTOM_AGENT_URL', url);
+  } else {
+    localStorage.removeItem('AEGIS_CUSTOM_AGENT_URL');
+  }
+}
 
 // NEW-05: Validate VITE_AGENT_URL scheme at module load time.
 // Prevents URL injection: if an attacker compromises the build pipeline and
@@ -46,10 +67,11 @@ function validateAndResolveAgentBase(raw: string): string {
   }
 }
 
-const AGENT_BASE = validateAndResolveAgentBase(RAW_AGENT_URL);
-
 /** Whether we're in production mode (IronClaw agent, no local proxy) */
-export const IS_PROD_AGENT = Boolean(import.meta.env.VITE_AGENT_URL);
+export const IS_PROD_AGENT = () => {
+  const base = getAgentBase();
+  return !base.startsWith('/') && !base.includes('localhost') && !base.includes('127.0.0.1');
+};
 
 // ─── Agent API Key ────────────────────────────────────────────────────────────
 
@@ -68,7 +90,8 @@ const AGENT_API_KEY = (import.meta.env.VITE_AGENT_API_KEY as string | undefined)
  *  - AbortSignal for timeout/unmount cleanup     (NEW-01)
  */
 async function agentPost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${AGENT_BASE}${path}`, {
+  const base = getAgentBase();
+  const res = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -168,7 +191,8 @@ export async function skillsExecute(
 /** Returns true if the TEE agent is reachable. */
 export async function pingAgent(): Promise<boolean> {
   try {
-    const res = await fetch(`${AGENT_BASE}/health`, {
+    const base = getAgentBase();
+    const res = await fetch(`${base}/health`, {
       signal: AbortSignal.timeout(3000),
     });
     return res.ok;

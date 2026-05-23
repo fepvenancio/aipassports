@@ -1,14 +1,18 @@
 import { useState } from 'react';
 import { useWiki } from '../../../hooks/useWiki';
 import { SkeletonSlugItem, SkeletonText } from '../../UI/CustomSkeleton';
+import { Card, CardHeader, CardTitle, CardContent, CardFooter } from '../../UI/Card';
+import Button from '../../UI/Button';
+import Input from '../../UI/Input';
+import Badge from '../../UI/Badge';
 
 const STATUS_LABEL: Record<string, string> = {
-  'fetching-slugs':    '› Loading pages…',
-  'fetching-pointer':  '› Reading NEAR index…',
-  'decrypting-tee':    '› Decrypting in TEE…',
-  'saving-walrus':     '› Uploading to Walrus…',
-  'committing-near':   '› Committing to NEAR…',
-  'deleting':          '› Removing…',
+  'fetching-slugs':    'Loading pages...',
+  'fetching-pointer':  'Reading NEAR index...',
+  'decrypting-tee':    'Decrypting in TEE...',
+  'saving-walrus':     'Uploading to Walrus...',
+  'committing-near':   'Committing to NEAR...',
+  'deleting':          'Removing page...',
 };
 
 export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) {
@@ -26,160 +30,177 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
   }
 
   return (
-    <div style={{ display: 'flex', height: '100%', gap: 16 }}>
+    <div className="flex h-full w-full gap-4 animate-fade-in">
 
-      {/* ── Slug list ────────────────────────────────────────────────────── */}
-      <div className="glass" style={{ width: 252, flexShrink: 0, borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* ── Page List Sidebar ────────────────────────────────────────────────── */}
+      <Card className="w-60 shrink-0 flex flex-col overflow-hidden">
+        
+        {/* Sidebar Header */}
+        <CardHeader className="py-2.5">
+          <CardTitle>WIKI MEMORY</CardTitle>
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={startNewPage}
+          >
+            + New
+          </Button>
+        </CardHeader>
 
-        {/* Header */}
-        <div style={{ padding: '13px 14px 10px', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--color-text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-            WIKI PAGES
-          </span>
-          <button className="btn btn-ghost btn-xs" onClick={startNewPage} style={{ gap: 4, padding: '3px 9px' }}>
-            <span style={{ fontSize: 13 }}>+</span> New
-          </button>
-        </div>
-
-        {/* List */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0' }}>
+        {/* Sidebar List */}
+        <CardContent className="flex-grow overflow-y-auto py-2 p-0 gap-0">
           {state.status === 'fetching-slugs' ? (
             Array.from({ length: 4 }).map((_, i) => <SkeletonSlugItem key={i} />)
           ) : state.slugs.length === 0 && !state.isNewPage ? (
-            <div style={{ padding: '28px 14px', textAlign: 'center', color: 'var(--color-text-3)', fontSize: 12 }}>
-              <div style={{ fontSize: 28, marginBottom: 10 }}>📄</div>
-              No pages yet
+            <div className="py-12 text-center text-slate-500 text-xs flex flex-col items-center gap-2">
+              <span className="text-3xl select-none">📄</span>
+              <span className="font-medium font-sans">No pages found</span>
             </div>
           ) : (
-            state.slugs.map((slug) => {
-              const active = slug === state.selectedSlug;
-              return (
-                <button
-                  key={slug}
-                  onClick={() => selectPage(slug)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    width: '100%', padding: '8px 14px',
-                    background: active ? 'var(--color-accent-dim)' : 'transparent',
-                    border: 'none', cursor: 'pointer', textAlign: 'left',
-                    borderLeft: `2px solid ${active ? 'var(--color-accent)' : 'transparent'}`,
-                    transition: 'all 0.12s',
-                  }}
-                  onMouseEnter={(e) => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'rgba(0,240,255,0.04)'; }}
-                  onMouseLeave={(e) => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
-                >
-                  <span style={{ width: 6, height: 6, borderRadius: 99, background: active ? 'var(--color-accent)' : 'var(--color-text-3)', flexShrink: 0, transition: 'background 0.12s' }} />
-                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: active ? 'var(--color-accent)' : 'var(--color-text-2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {slug}
-                  </span>
-                </button>
-              );
-            })
+            <div className="flex flex-col gap-0.5 px-2">
+              {state.slugs.map((slug) => {
+                const active = slug === state.selectedSlug;
+                return (
+                  <Button
+                    key={slug}
+                    onClick={() => selectPage(slug)}
+                    variant={active ? 'secondary' : 'ghost'}
+                    className={`w-full flex items-center gap-2.5 justify-start text-xs font-mono truncate px-3 py-2 ${
+                      active ? 'bg-slate-950 border border-slate-800 text-cyan-400 font-semibold shadow-inner' : ''
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${active ? 'bg-cyan-400' : 'bg-slate-600'}`} />
+                    <span className="truncate flex-grow text-left">{slug}</span>
+                  </Button>
+                );
+              })}
+            </div>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
-      {/* ── Editor ───────────────────────────────────────────────────────── */}
-      <div className="glass" style={{ flex: 1, borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
+      {/* ── Editor Canvas ───────────────────────────────────────────────────── */}
+      <Card className="flex-1 flex flex-col overflow-hidden">
+        
         {!state.isNewPage && !state.selectedSlug ? (
           <EmptyEditor onNew={startNewPage} />
         ) : (
           <>
-            {/* Toolbar */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
-              {state.isNewPage ? (
-                <input
-                  id="input-wiki-slug"
-                  className="input input-mono"
-                  placeholder="page-slug"
-                  value={newSlug}
-                  onChange={(e) => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
-                  style={{ maxWidth: 220, fontSize: 12 }}
-                />
-              ) : (
-                <span style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-accent)', padding: '2px 8px', background: 'var(--color-accent-dim)', borderRadius: 5 }}>
-                  {state.selectedSlug}
-                </span>
-              )}
+            {/* Toolbar Header */}
+            <CardHeader className="py-2.5 flex items-center justify-between gap-4">
+              
+              <div className="flex items-center gap-3">
+                {state.isNewPage ? (
+                  <Input
+                    id="input-wiki-slug"
+                    type="text"
+                    mono
+                    className="max-w-[180px] px-2.5 py-1 text-xs"
+                    placeholder="page-slug"
+                    value={newSlug}
+                    onChange={(e) => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                  />
+                ) : (
+                  <Badge variant="default" className="text-xs px-2.5 py-0.5 font-semibold">
+                    {state.selectedSlug}
+                  </Badge>
+                )}
 
-              <div style={{ flex: 1 }} />
+                {/* Unsaved changes indicator */}
+                {hasUnsavedChanges && state.status === 'idle' && (
+                  <Badge variant="warning" className="text-[9px] px-2 py-0.5 select-none font-semibold">
+                    UNSAVED
+                  </Badge>
+                )}
+              </div>
 
-              {/* Busy status */}
-              {isBusy && statusLabel && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: 'var(--color-accent)', fontFamily: 'var(--font-mono)' }}>
-                  <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
-                  {statusLabel}
+              <div className="flex items-center gap-3 shrink-0">
+                {/* Busy status */}
+                {isBusy && statusLabel && (
+                  <Badge variant="default" className="px-2 py-0.5 font-semibold select-none">
+                    <span className="w-3 h-3 rounded-full border border-slate-800 border-t-cyan-400 animate-spin" />
+                    <span>{statusLabel}</span>
+                  </Badge>
+                )}
+
+                {/* Error badge */}
+                {state.status === 'error' && (
+                  <Badge variant="destructive" className="px-2 py-0.5 font-semibold">
+                    {state.errorMessage?.slice(0, 40)}
+                  </Badge>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-2">
+                  {!state.isNewPage && state.selectedSlug && (
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => { if (confirm(`Delete "${state.selectedSlug}"?`)) deletePage(state.selectedSlug!); }}
+                      disabled={isBusy}
+                    >
+                      Delete
+                    </Button>
+                  )}
+
+                  <Button
+                    id="btn-save-wiki"
+                    variant="default"
+                    size="sm"
+                    onClick={handleSave}
+                    disabled={isBusy || (state.isNewPage ? !newSlug : !hasUnsavedChanges)}
+                  >
+                    {state.status === 'saving-walrus' || state.status === 'committing-near' ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-3.5 h-3.5 rounded-full border border-slate-950/20 border-t-slate-950 animate-spin" />
+                        Saving...
+                      </span>
+                    ) : (
+                      state.isNewPage ? 'Create Page' : 'Save Changes'
+                    )}
+                  </Button>
                 </div>
-              )}
-
-              {/* Error */}
-              {state.status === 'error' && (
-                <span className="badge badge-alert">{state.errorMessage?.slice(0, 40)}</span>
-              )}
-
-              {/* Unsaved dot */}
-              {hasUnsavedChanges && state.status === 'idle' && (
-                <span style={{ width: 6, height: 6, borderRadius: 99, background: 'var(--color-amber)' }} title="Unsaved changes" />
-              )}
-
-              {/* Delete */}
-              {!state.isNewPage && state.selectedSlug && (
-                <button className="btn btn-alert btn-sm" onClick={() => { if (confirm(`Delete "${state.selectedSlug}"?`)) deletePage(state.selectedSlug!); }} disabled={isBusy}>
-                  Delete
-                </button>
-              )}
-
-              {/* Save */}
-              <button
-                id="btn-save-wiki"
-                className="btn btn-accent btn-sm"
-                onClick={handleSave}
-                disabled={isBusy || (state.isNewPage ? !newSlug : !hasUnsavedChanges)}
-              >
-                {state.status === 'saving-walrus' || state.status === 'committing-near'
-                  ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5, borderTopColor: '#03040a', borderColor: 'rgba(0,0,0,0.2)' }} /> Saving…</>
-                  : state.isNewPage ? 'Create Page' : 'Save'}
-              </button>
-            </div>
+              </div>
+            </CardHeader>
 
             {/* Loading skeleton while decrypting */}
             {(state.status === 'fetching-pointer' || state.status === 'decrypting-tee') ? (
-              <div style={{ flex: 1, padding: 24 }}>
+              <div className="flex-grow p-6">
                 <SkeletonText lines={8} />
               </div>
             ) : (
               <textarea
                 id="editor-wiki-content"
-                className="input textarea input-mono"
+                className="flex-grow w-full bg-transparent border-0 outline-none text-slate-100 p-6 leading-relaxed font-mono text-sm resize-none focus:ring-0 focus:outline-none"
                 value={state.content}
                 onChange={(e) => setContent(e.target.value)}
-                placeholder={`Write your wiki page in markdown…\n\nContent is AES-256-GCM encrypted inside the IronClaw TEE before Walrus upload.`}
-                style={{ flex: 1, resize: 'none', border: 'none', borderRadius: 0, background: 'transparent', padding: '20px', lineHeight: 1.75, fontSize: 13 }}
+                placeholder={`Write your wiki page in Markdown...\n\nAll content is derived, encrypted (AES-256-GCM), and sealed inside the hardware TEE before uploading.`}
               />
             )}
 
-            {/* Metadata footer */}
+            {/* Metadata Footer */}
             {state.pointer && (
-              <div style={{ padding: '8px 18px', borderTop: '1px solid var(--color-border)', display: 'flex', gap: 20, fontSize: 10, color: 'var(--color-text-3)', fontFamily: 'var(--font-mono)', flexShrink: 0, flexWrap: 'wrap' }}>
-                <span>blob: <span style={{ color: 'var(--color-accent)', opacity: 0.7 }}>{state.pointer.blob_id.slice(0, 20)}…</span></span>
-                <span>sha256: <span style={{ color: 'var(--color-accent)', opacity: 0.7 }}>{state.pointer.content_sha256.slice(0, 16)}…</span></span>
-                <span>updated: {new Date(state.pointer.updated_at_ms).toLocaleString()}</span>
-              </div>
+              <CardFooter className="py-2.5">
+                <span>blob: <span className="text-slate-400">{state.pointer.blob_id.slice(0, 24)}...</span></span>
+                <span>sha256: <span className="text-slate-400">{state.pointer.content_sha256.slice(0, 16)}...</span></span>
+                <span>updated: <span className="text-slate-400">{new Date(state.pointer.updated_at_ms).toLocaleString()}</span></span>
+              </CardFooter>
             )}
           </>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
 
 function EmptyEditor({ onNew }: { onNew: () => void }) {
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, color: 'var(--color-text-3)' }}>
-      <div style={{ fontSize: 44 }}>📝</div>
-      <p style={{ margin: 0, fontSize: 13 }}>Select a page or create a new one</p>
-      <button className="btn btn-ghost btn-sm" onClick={onNew}>+ New Wiki Page</button>
+    <div className="flex-grow flex flex-col items-center justify-center gap-4 text-slate-500 select-none py-16">
+      <span className="text-5xl">📝</span>
+      <p className="text-xs font-semibold text-slate-400">Select a wiki page to view or create a new one</p>
+      <Button variant="outline" size="sm" onClick={onNew}>
+        + New Wiki Page
+      </Button>
     </div>
   );
 }

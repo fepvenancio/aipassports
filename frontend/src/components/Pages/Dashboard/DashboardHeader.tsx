@@ -1,4 +1,5 @@
 import type { DashTab } from './DashboardSidebar';
+import Badge from '../../UI/Badge';
 
 const TAB_LABEL: Record<DashTab, string> = {
   wiki:     'Wiki Memory',
@@ -19,63 +20,37 @@ export default function DashboardHeader({ activeTab, nearAccountId, agentOnline 
     : nearAccountId;
 
   return (
-    <header style={{
-      height: 56,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      padding: '0 24px',
-      background: 'var(--color-surface)',
-      borderBottom: '1px solid var(--color-border)',
-      flexShrink: 0,
-    }}>
+    <header className="h-14 flex items-center justify-between px-6 bg-slate-900 border-b border-slate-800 shrink-0">
       {/* Left: page title */}
-      <h1 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--color-text-1)' }}>
+      <h1 className="text-sm font-semibold text-slate-100">
         {TAB_LABEL[activeTab]}
       </h1>
 
       {/* Right: status indicators */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="flex items-center gap-2">
         {/* Agent status */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 10px', borderRadius: 99,
-          background: agentOnline === true
-            ? 'var(--color-accent-dim)'
-            : agentOnline === false
-            ? 'var(--color-alert-dim)'
-            : 'rgba(255,255,255,0.04)',
-          border: `1px solid ${
-            agentOnline === true ? 'rgba(0,240,255,0.15)' :
-            agentOnline === false ? 'rgba(255,59,92,0.15)' :
-            'var(--color-border)'
-          }`,
-          fontSize: 11,
-          color: agentOnline === true
-            ? 'var(--color-accent)'
-            : agentOnline === false
-            ? 'var(--color-alert)'
-            : 'var(--color-text-3)',
-        }}>
-          <span className={agentOnline === true ? 'animate-pulse' : ''}>
-            {agentOnline === null ? '○' : agentOnline ? '●' : '●'}
+        <Badge
+          variant={
+            agentOnline === true ? 'success' :
+            agentOnline === false ? 'destructive' :
+            'secondary'
+          }
+          className="font-semibold select-none text-[9px] px-2.5 py-0.5"
+        >
+          <span className={`w-1 h-1 rounded-full ${
+            agentOnline === true ? 'bg-emerald-400 animate-pulse-dot' :
+            agentOnline === false ? 'bg-rose-500' :
+            'bg-slate-500'
+          }`} />
+          <span>
+            {agentOnline === null ? 'PROBING ENCLAVE...' : agentOnline ? 'ENCLAVE ONLINE' : 'ENCLAVE OFFLINE'}
           </span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 500 }}>
-            {agentOnline === null ? 'PROBING…' : agentOnline ? 'ENCLAVE ONLINE' : 'ENCLAVE OFFLINE'}
-          </span>
-        </div>
+        </Badge>
 
         {/* Account pill */}
-        <div style={{
-          padding: '4px 10px', borderRadius: 99,
-          background: 'var(--color-primary)',
-          border: '1px solid var(--color-border)',
-          fontSize: 11,
-          fontFamily: 'var(--font-mono)',
-          color: 'var(--color-text-2)',
-        }}>
+        <Badge variant="secondary" className="px-2.5 py-0.5 text-[9px] hover:border-slate-700 transition-colors">
           {accountShort}
-        </div>
+        </Badge>
       </div>
     </header>
   );
