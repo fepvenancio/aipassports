@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import * as agent from '../api/gateway';
 import { detectZdrViolation, type ZdrMarker } from '../api/types';
+import { sanitizeError } from '../utils/sanitizeError';
 
 // ─── State Machine ────────────────────────────────────────────────────────────
 
@@ -132,7 +133,7 @@ export function useSkillExecutor(nearAccountId: string) {
         status: 'error',
         zdrMarker: null,
         output: null,
-        errorMessage: (e as Error).message,
+        errorMessage: sanitizeError(e),
       });
     } finally {
       inFlightRef.current = false;

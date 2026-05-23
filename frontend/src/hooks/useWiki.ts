@@ -3,6 +3,7 @@ import * as nearRpc from '../api/nearRpc';
 import * as agent from '../api/gateway';
 import * as wallet from '../near/wallet';
 import type { VaultPointer } from '../api/types';
+import { sanitizeError } from '../utils/sanitizeError';
 
 // ─── State Machine ────────────────────────────────────────────────────────────
 
@@ -84,7 +85,7 @@ export function useWiki(nearAccountId: string) {
       const slugs = await nearRpc.listWikiSlugs(nearAccountId);
       setState((s) => ({ ...s, status: 'idle', slugs }));
     } catch (e) {
-      setError((e as Error).message);
+      setError(sanitizeError(e));
     }
   }, [nearAccountId]);
 
@@ -124,7 +125,7 @@ export function useWiki(nearAccountId: string) {
       }));
     } catch (e) {
       if (controller.signal.aborted) return;
-      setError((e as Error).message);
+      setError(sanitizeError(e));
     }
   }
 
@@ -184,7 +185,7 @@ export function useWiki(nearAccountId: string) {
       }));
     } catch (e) {
       if (controller.signal.aborted) return;
-      setError((e as Error).message);
+      setError(sanitizeError(e));
     } finally {
       savingRef.current = false;
     }
@@ -206,7 +207,7 @@ export function useWiki(nearAccountId: string) {
         isNewPage: false,
       }));
     } catch (e) {
-      setError((e as Error).message);
+      setError(sanitizeError(e));
     }
   }
 

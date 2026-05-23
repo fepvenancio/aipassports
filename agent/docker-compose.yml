@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IronClaw Agent — Local Development Docker Compose
+#
+# Starts the agent in TEE_SIMULATION=true mode alongside the frontend dev server.
+# The Vite dev proxy routes /api → http://agent:8080 automatically.
+#
+# Usage:
+#   1. Copy .env.example to agent.dev.env and fill in LLM_API_KEY
+#   2. docker compose up
+#   3. Open http://localhost:5173 in your browser
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ironclaw-agent:dev
+    container_name: ironclaw-agent
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Simulation mode: the agent generates and persists a local master secret
+      # instead of unsealing from a TEE hardware device.
+      TEE_SIMULATION: "true"
+      # Required: Bearer token for the /vault/* and /skills/* routes.
+      IRONCLAW_AGENT_API_KEY: "${IRONCLAW_AGENT_API_KEY:-dev-key-change-me}"
+      # Required for skill execution. Set in your shell or agent.dev.env.
+      LLM_API_KEY: "${LLM_API_KEY}"
+      # CORS: allow the Vite dev server origin
+      ALLOWED_ORIGIN: "http://localhost:5173"
+      PORT: "8080"
+    volumes:
+      # Persist the simulation master secret across container restarts.
+      # WARNING: This volume contains the encryption key — do not share it.
+      - agent-secrets:/app/.secret
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  agent-secrets:
+    driver: local

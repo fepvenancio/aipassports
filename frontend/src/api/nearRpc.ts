@@ -11,8 +11,34 @@ import type { VaultPointer } from './types';
 // values. We decode: Uint8Array → UTF-8 string → JSON.parse.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const NEAR_RPC = (import.meta.env.VITE_NEAR_RPC_URL as string | undefined)
-  ?? 'https://rpc.testnet.near.org';
+// MEDIUM-P2-1: Validate NEAR RPC URL scheme at module load time.
+// An attacker who compromises the build pipeline and sets VITE_NEAR_RPC_URL to
+// http://attacker.com would redirect ALL view calls (including pointer lookups
+// that drive key derivation) to a server they control.
+// Allowed: https:// in production; http://localhost or http://127.0.0.1 in dev.
+function validateNearRpcUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const isHttps = url.protocol === 'https:';
+    const isLocalHttp =
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+    if (!isHttps && !isLocalHttp) {
+      throw new Error(
+        `VITE_NEAR_RPC_URL must be https:// (got "${raw}"). ` +
+        `For local dev, use http://localhost only.`
+      );
+    }
+    return raw;
+  } catch (e) {
+    throw new Error(`VITE_NEAR_RPC_URL is not a valid URL: "${raw}". ${(e as Error).message}`);
+  }
+}
+
+const NEAR_RPC = validateNearRpcUrl(
+  (import.meta.env.VITE_NEAR_RPC_URL as string | undefined)
+    ?? 'https://rpc.testnet.near.org'
+);
 
 const CONTRACT_ID = (import.meta.env.VITE_NEAR_CONTRACT_ID as string | undefined)
   ?? 'aegis-vault.testnet';
@@ -55,7 +81,16 @@ async function viewCall<T>(methodName: string, args: Record<string, unknown>): P
   // Decode byte array → UTF-8 → JSON
   const bytes = new Uint8Array(json.result.result);
   const text = new TextDecoder('utf-8').decode(bytes);
-  return JSON.parse(text) as T;
+  // HIGH-P2-4: Validate decoded JSON has no prototype-polluting keys before
+  // returning it. JSON.parse revives plain objects, but a crafted RPC response
+  // could include "__proto__" as a key which mutates Object.prototype.
+  const parsed = JSON.parse(text, (key, val) => {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      return undefined; // drop prototype-polluting keys
+    }
+    return val;
+  });
+  return parsed as T;
 }
 
 // ─── View Methods ─────────────────────────────────────────────────────────────

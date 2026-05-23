@@ -14,6 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use rand::RngCore;
+use rand::rngs::OsRng;
 
 /// Length of the master secret in bytes.
 pub const MASTER_SECRET_LEN: usize = 32;
@@ -59,19 +60,36 @@ pub fn load_master_secret() -> Result<[u8; MASTER_SECRET_LEN], KeyError> {
             key.copy_from_slice(&bytes);
             Ok(key)
         } else {
-            // Generate a secure cryptographically random master secret
+            // P3-4 FIX: Use OsRng (getrandom syscall) instead of thread_rng().
+            // thread_rng() seeds from OS entropy at startup but may buffer in userspace;
+            // OsRng calls getrandom(2) / /dev/urandom directly on every invocation,
+            // which is required for TEE environments where PRNG seeding may differ.
             let mut key = [0u8; MASTER_SECRET_LEN];
-            rand::thread_rng().fill_bytes(&mut key);
-            fs::write(&secret_path, key).map_err(KeyError::WriteFailed)?;
-            // C-05 FIX: Restrict file to owner-read-only (0o600).
-            // fs::write uses the process umask (typically 0o644 = world-readable).
-            // A world-readable master secret defeats all TEE confidentiality guarantees.
+            OsRng.fill_bytes(&mut key);
+
+            // P3-3 FIX: Atomic write — write to a temp file, set permissions, then rename.
+            // The previous code wrote key with default umask (0o644 = world-readable),
+            // then chmod'd to 0o600. The window between write and chmod let another process
+            // read the key.
+            // Fix: create a sibling temp file, chmod it BEFORE writing sensitive bytes,
+            // then rename atomically. rename(2) is atomic on POSIX (same filesystem).
+            let tmp_path = secret_dir.join("master_secret.bin.tmp");
+
+            // Prepare the temp file with correct permissions before writing any data
+            fs::write(&tmp_path, [0u8; MASTER_SECRET_LEN]).map_err(KeyError::WriteFailed)?;
             #[cfg(unix)]
             fs::set_permissions(
-                &secret_path,
+                &tmp_path,
                 fs::Permissions::from_mode(0o600),
             )
             .map_err(KeyError::WriteFailed)?;
+
+            // Now write the actual key — permissions already correct, no race window
+            fs::write(&tmp_path, key).map_err(KeyError::WriteFailed)?;
+
+            // Atomically rename into the final path
+            fs::rename(&tmp_path, &secret_path).map_err(KeyError::WriteFailed)?;
+
             Ok(key)
         }
     } else {

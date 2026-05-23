@@ -38,6 +38,16 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{info, warn, error};
 use subtle::ConstantTimeEq;
 
+/// MEDIUM-P2-3: Sanitize a string before emitting it to structured logs.
+/// Strips non-printable ASCII (including ANSI escape codes, newlines, tabs)
+/// and caps length to prevent log injection or log flooding.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(80)
+        .collect()
+}
+
 mod key_derivation;
 mod vault_writer;
 mod vault_reader;
@@ -238,11 +248,23 @@ async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // P3-1 FIX: case-insensitive Bearer prefix matching per RFC 9110 §11.4.
+    // The previous code used str::strip_prefix("Bearer ") which is case-sensitive,
+    // rejecting "bearer <token>" (lowercase) and "BEARER <token>" (uppercase).
+    // Fix: normalise the first token to lowercase before stripping.
     let provided_key = req
         .headers()
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|v| {
+            let lower = v.to_lowercase();
+            if lower.starts_with("bearer ") {
+                // Use original value bytes after the prefix to preserve key casing
+                Some(&v["bearer ".len()..])
+            } else {
+                None
+            }
+        })
         .map(|s| s.as_bytes().to_vec());
 
     let is_valid = match provided_key {
@@ -390,7 +412,8 @@ async fn vault_write_handler(
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
     }
 
-    info!("Processing vault write for NEAR Account: {}", req.near_account_id);
+    // MEDIUM-P2-3: sanitize before logging to prevent log injection.
+    info!("Processing vault write for NEAR Account: {}", sanitize_for_log(&req.near_account_id));
     let epochs = req.epochs.unwrap_or(26);
 
     let result = vault_writer::encrypt_and_publish(
@@ -434,7 +457,11 @@ async fn vault_read_handler(
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
     }
 
-    info!("Processing vault read for NEAR Account: {}, blobId: {}", req.near_account_id, req.blob_id);
+    // MEDIUM-P2-3: sanitize both fields before logging.
+    info!("Processing vault read for NEAR Account: {}, blobId: {}",
+        sanitize_for_log(&req.near_account_id),
+        sanitize_for_log(&req.blob_id)
+    );
 
     let plaintext = vault_reader::download_and_decrypt(
         &state.master_secret,
@@ -466,7 +493,8 @@ async fn skill_execute_handler(
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
     }
 
-    info!("Processing skill execution for NEAR Account: {}", req.near_account_id);
+    // MEDIUM-P2-3: sanitize before logging.
+    info!("Processing skill execution for NEAR Account: {}", sanitize_for_log(&req.near_account_id));
 
     let response_json = skill_executor::execute_skill(
         &state.master_secret,

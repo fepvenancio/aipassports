@@ -3,6 +3,7 @@ import * as nearRpc from '../api/nearRpc';
 import * as agent from '../api/gateway';
 import * as wallet from '../near/wallet';
 import type { SkillEntry, SkillConfig, VaultPointer } from '../api/types';
+import { sanitizeError } from '../utils/sanitizeError';
 
 // ─── State Machine ────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ export function useSkills(nearAccountId: string) {
       setStatus('idle');
     } catch (e) {
       setStatus('error');
-      setErrorMessage((e as Error).message);
+      setErrorMessage(sanitizeError(e));
     }
   }, [nearAccountId]);
 
@@ -99,7 +100,7 @@ export function useSkills(nearAccountId: string) {
       setStatus('idle');
     } catch (e) {
       setStatus('error');
-      setErrorMessage((e as Error).message);
+      setErrorMessage(sanitizeError(e));
     }
   }
 
@@ -114,7 +115,7 @@ export function useSkills(nearAccountId: string) {
       setStatus('idle');
     } catch (e) {
       setStatus('error');
-      setErrorMessage((e as Error).message);
+      setErrorMessage(sanitizeError(e));
     }
   }
 
