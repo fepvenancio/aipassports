@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Sovereign AI Passport — decoupled, provider-agnostic context layer with hardware-enforced zero-trust boundary",
   "scripts": {
-    "build": "npx pnpm@10 -C frontend install && npx pnpm@10 -C frontend build",
+    "build": "corepack enable pnpm && pnpm -C frontend install && pnpm -C frontend build",
     "test": "pnpm test:backend && pnpm test:agent && pnpm test:frontend",
     "test:backend": "cargo test --manifest-path backend/Cargo.toml",
     "test:agent": "cargo test --manifest-path agent/Cargo.toml",

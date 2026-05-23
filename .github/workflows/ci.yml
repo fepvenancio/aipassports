@@ -22,4 +22,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Install Frontend Dependencies
+        run: pnpm -C frontend install --frozen-lockfile
+
       - run: pnpm test
