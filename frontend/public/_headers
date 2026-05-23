@@ -26,7 +26,7 @@
     upgrade-insecure-requests       — force HTTPS on mixed-content subresources
 */
 /
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://rpc.testnet.near.org https://rpc.mainnet.near.org https://wallet.testnet.near.org https://wallet.mainnet.near.org; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.aipassports.xyz https://rpc.testnet.near.org https://rpc.mainnet.near.org https://wallet.testnet.near.org https://wallet.mainnet.near.org; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
