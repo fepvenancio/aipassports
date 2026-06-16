@@ -1,5 +1,8 @@
 use near_sdk::{env, near};
 
+// Re-export Permission enum from parent module for use in validation
+use super::Permission;
+
 // //////////////////////////////////////////////////////////////
 //                          DATA MODEL
 // //////////////////////////////////////////////////////////////
@@ -114,4 +117,24 @@ pub fn validate_content_sha256(hash: &str) {
             env::panic_str("VAULT_ERROR_INVALID_HASH");
         }
     }
+}
+
+/// Maximum number of members any single team can have.
+/// Prevents unbounded Vec growth and storage staking attacks.
+pub const MAX_TEAM_MEMBERS: usize = 100;
+
+/// @notice Validates a team ID according to the same rules as identifiers.
+/// @dev Reuses validate_identifier logic for consistency.
+///      Rule: ^[a-z0-9][a-z0-9_-]{0,127}$
+///      Panics with "VAULT_ERROR_INVALID_IDENTIFIER" on failure.
+pub fn validate_team_id(team_id: &str) {
+    validate_identifier(team_id);
+}
+
+/// @notice Validates that a Permission enum variant is valid.
+/// @dev The enum definition already ensures type safety, but this provides
+///      a consistent validation interface for callers.
+pub fn validate_permission(permission: &Permission) {
+    // Enum variants are validated by the type system
+    let _ = permission;
 }
