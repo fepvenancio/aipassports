@@ -408,6 +408,380 @@ impl AegisContract {
     }
 
     // //////////////////////////////////////////////////////////////
+    //                      TEAM VAULT METHODS
+    // //////////////////////////////////////////////////////////////
+
+    /// @notice Creates or updates a wiki page pointer for a team.
+    /// @dev Validates inputs, enforces team write permission, and handles storage costs.
+    /// @param team_id The team that owns the wiki page.
+    /// @param slug Unique identifier for the wiki page.
+    /// @param blob_id Walrus blob ID where the encrypted content is stored.
+    /// @param content_sha256 SHA-256 hash of the original plaintext.
+    #[payable]
+    pub fn update_team_wiki_pointer(&mut self, team_id: String, slug: String, blob_id: String, content_sha256: String) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate inputs
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&slug);
+        vault::validate_blob_id(&blob_id);
+        vault::validate_content_sha256(&content_sha256);
+        
+        // Validate team write permission
+        self.validate_team_write_permission(&team_id, &caller);
+        
+        let composite_key = format!("{}:{}", team_id, slug);
+
+        let is_new = !self.team_wiki_pointers.contains_key(&composite_key);
+
+        // Enforce max-entries cap before inserting a new entry
+        if is_new {
+            let current_count = self.team_wiki_slug_lists
+                .get(&team_id)
+                .map_or(0, |v| v.len());
+            if current_count >= vault::MAX_ENTRIES_PER_USER {
+                env::panic_str("VAULT_ERROR_MAX_ENTRIES_REACHED");
+            }
+        }
+
+        // Calculate storage byte changes manually
+        let mut bytes_added = 0u64;
+        let mut bytes_freed = 0u64;
+
+        if is_new {
+            // New key-value pair in team_wiki_pointers
+            let key_size = 1 + 4 + composite_key.len() as u64;
+            // version(1) + blob_id(4 + len) + content_sha256(4 + 64) + updated_at_ms(8)
+            let val_size = 1 + 4 + blob_id.len() as u64 + 4 + content_sha256.len() as u64 + 8;
+            bytes_added += key_size + val_size + 40;
+
+            // Adding slug to team_wiki_slug_lists
+            let has_list = self.team_wiki_slug_lists.contains_key(&team_id);
+            if !has_list {
+                let list_key_size = 1 + 4 + team_id.len() as u64;
+                let list_val_size = 4 + 4 + slug.len() as u64;
+                bytes_added += list_key_size + list_val_size + 40;
+            } else {
+                bytes_added += 4 + slug.len() as u64;
+            }
+        } else {
+            // Updating existing pointer in team_wiki_pointers. Only blob_id length can change.
+            let old_pointer = self.team_wiki_pointers.get(&composite_key).unwrap();
+            let new_len = blob_id.len() as u64;
+            let old_len = old_pointer.blob_id.len() as u64;
+            if new_len > old_len {
+                bytes_added += new_len - old_len;
+            } else if old_len > new_len {
+                bytes_freed += old_len - new_len;
+            }
+        }
+
+        let pointer = VaultPointer {
+            version: 1,
+            blob_id,
+            content_sha256,
+            updated_at_ms: env::block_timestamp_ms(),
+        };
+        self.team_wiki_pointers.insert(composite_key, pointer);
+
+        // Update enumeration list if a new key is added
+        if is_new {
+            let mut list = self.team_wiki_slug_lists.get(&team_id).cloned().unwrap_or_default();
+            list.push(slug);
+            self.team_wiki_slug_lists.insert(team_id.clone(), list);
+        }
+
+        // Process storage costs and refunds
+        if bytes_added > bytes_freed {
+            self._reconcile_storage_deposit(caller, bytes_added - bytes_freed);
+        } else {
+            let net_freed = bytes_freed - bytes_added;
+            if net_freed > 0 {
+                self._refund_released_storage(caller.clone(), net_freed);
+            }
+            let attached_deposit = env::attached_deposit();
+            if attached_deposit.as_yoctonear() > 0 {
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR full deposit to {} (no net storage added)",
+                    attached_deposit.as_yoctonear(), caller
+                ));
+                Promise::new(caller).transfer(attached_deposit);
+            }
+        }
+    }
+
+    /// @notice Deletes a team wiki page pointer and refunds its storage stake.
+    /// @dev Requires team write permission.
+    /// @param team_id The team that owns the wiki page.
+    /// @param slug Unique identifier for the wiki page.
+    pub fn remove_team_wiki_pointer(&mut self, team_id: String, slug: String) {
+        let caller = env::predecessor_account_id();
+        
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&slug);
+        
+        // Validate team write permission
+        self.validate_team_write_permission(&team_id, &caller);
+
+        let composite_key = format!("{}:{}", team_id, slug);
+
+        if !self.team_wiki_pointers.contains_key(&composite_key) {
+            env::panic_str("VAULT_ERROR_NOT_FOUND");
+        }
+
+        let pointer = self.team_wiki_pointers.get(&composite_key).unwrap();
+        let mut bytes_freed = 0u64;
+
+        // Removing key-value pair in team_wiki_pointers
+        let key_size = 1 + 4 + composite_key.len() as u64;
+        let val_size = pointer.serialized_size();
+        bytes_freed += key_size + val_size + 40;
+
+        // Remove slug from the enumeration list
+        if let Some(mut list) = self.team_wiki_slug_lists.get(&team_id).cloned() {
+            if let Some(pos) = list.iter().position(|x| x == &slug) {
+                list.swap_remove(pos);
+                if list.is_empty() {
+                    self.team_wiki_slug_lists.remove(&team_id);
+                    // Freeing entire list entry
+                    let list_key_size = 1 + 4 + team_id.len() as u64;
+                    let list_val_size = 4 + 4 + slug.len() as u64;
+                    bytes_freed += list_key_size + list_val_size + 40;
+                } else {
+                    self.team_wiki_slug_lists.insert(team_id.clone(), list);
+                    // Freeing single element from Vec
+                    bytes_freed += 4 + slug.len() as u64;
+                }
+            }
+        }
+
+        self.team_wiki_pointers.remove(&composite_key);
+
+        // Process storage refund
+        self._refund_released_storage(caller, bytes_freed);
+    }
+
+    /// @notice Returns a paginated list of wiki slugs for a team.
+    /// @dev Requires team membership.
+    /// @param team_id The team to list wiki slugs for.
+    /// @return Vec of wiki slug strings.
+    pub fn list_team_wiki_slugs(&self, team_id: String) -> Vec<String> {
+        // Validate team exists
+        if !self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_NOT_FOUND");
+        }
+        
+        // Validate caller is a team member
+        let caller = env::predecessor_account_id();
+        self.validate_team_membership(&team_id, &caller);
+        
+        self.team_wiki_slug_lists.get(&team_id).cloned().unwrap_or_default()
+    }
+
+    /// @notice Fetches a single team wiki page pointer.
+    /// @dev Requires team membership.
+    /// @param team_id The team that owns the wiki page.
+    /// @param slug Unique identifier for the wiki page.
+    /// @return Option<VaultPointer>.
+    pub fn get_team_wiki_pointer(&self, team_id: String, slug: String) -> Option<VaultPointer> {
+        // Validate inputs
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&slug);
+        
+        // Validate caller is a team member
+        let caller = env::predecessor_account_id();
+        self.validate_team_membership(&team_id, &caller);
+
+        let composite_key = format!("{}:{}", team_id, slug);
+        self.team_wiki_pointers.get(&composite_key).cloned()
+    }
+
+    /// @notice Creates or updates a skill pointer for a team.
+    /// @dev Validates inputs, enforces team write permission, and handles storage costs.
+    /// @param team_id The team that owns the skill.
+    /// @param skill_id Unique identifier for the skill.
+    /// @param blob_id Walrus blob ID where the encrypted content is stored.
+    /// @param content_sha256 SHA-256 hash of the original plaintext.
+    #[payable]
+    pub fn update_team_skill_pointer(&mut self, team_id: String, skill_id: String, blob_id: String, content_sha256: String) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate inputs
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&skill_id);
+        vault::validate_blob_id(&blob_id);
+        vault::validate_content_sha256(&content_sha256);
+        
+        // Validate team write permission
+        self.validate_team_write_permission(&team_id, &caller);
+        
+        let composite_key = format!("{}:{}", team_id, skill_id);
+
+        let is_new = !self.team_skill_pointers.contains_key(&composite_key);
+
+        // Enforce max-entries cap before inserting a new entry
+        if is_new {
+            let current_count = self.team_skill_id_lists
+                .get(&team_id)
+                .map_or(0, |v| v.len());
+            if current_count >= vault::MAX_ENTRIES_PER_USER {
+                env::panic_str("VAULT_ERROR_MAX_ENTRIES_REACHED");
+            }
+        }
+
+        // Calculate storage byte changes manually
+        let mut bytes_added = 0u64;
+        let mut bytes_freed = 0u64;
+
+        if is_new {
+            // New key-value pair in team_skill_pointers
+            let key_size = 1 + 4 + composite_key.len() as u64;
+            // version(1) + blob_id(4 + len) + content_sha256(4 + 64) + updated_at_ms(8)
+            let val_size = 1 + 4 + blob_id.len() as u64 + 4 + content_sha256.len() as u64 + 8;
+            bytes_added += key_size + val_size + 40;
+
+            // Adding skill_id to team_skill_id_lists
+            let has_list = self.team_skill_id_lists.contains_key(&team_id);
+            if !has_list {
+                let list_key_size = 1 + 4 + team_id.len() as u64;
+                let list_val_size = 4 + 4 + skill_id.len() as u64;
+                bytes_added += list_key_size + list_val_size + 40;
+            } else {
+                bytes_added += 4 + skill_id.len() as u64;
+            }
+        } else {
+            // Updating existing pointer in team_skill_pointers. Only blob_id length can change.
+            let old_pointer = self.team_skill_pointers.get(&composite_key).unwrap();
+            let new_len = blob_id.len() as u64;
+            let old_len = old_pointer.blob_id.len() as u64;
+            if new_len > old_len {
+                bytes_added += new_len - old_len;
+            } else if old_len > new_len {
+                bytes_freed += old_len - new_len;
+            }
+        }
+
+        let pointer = VaultPointer {
+            version: 1,
+            blob_id,
+            content_sha256,
+            updated_at_ms: env::block_timestamp_ms(),
+        };
+        self.team_skill_pointers.insert(composite_key, pointer);
+
+        // Update enumeration list if a new key is added
+        if is_new {
+            let mut list = self.team_skill_id_lists.get(&team_id).cloned().unwrap_or_default();
+            list.push(skill_id);
+            self.team_skill_id_lists.insert(team_id.clone(), list);
+        }
+
+        // Process storage costs and refunds
+        if bytes_added > bytes_freed {
+            self._reconcile_storage_deposit(caller, bytes_added - bytes_freed);
+        } else {
+            let net_freed = bytes_freed - bytes_added;
+            if net_freed > 0 {
+                self._refund_released_storage(caller.clone(), net_freed);
+            }
+            let attached_deposit = env::attached_deposit();
+            if attached_deposit.as_yoctonear() > 0 {
+                env::log_str(&format!(
+                    "VAULT_REFUND: returning {} yoctoNEAR full deposit to {} (no net storage added)",
+                    attached_deposit.as_yoctonear(), caller
+                ));
+                Promise::new(caller).transfer(attached_deposit);
+            }
+        }
+    }
+
+    /// @notice Deletes a team skill pointer and refunds its storage stake.
+    /// @dev Requires team write permission.
+    /// @param team_id The team that owns the skill.
+    /// @param skill_id Unique identifier for the skill.
+    pub fn remove_team_skill_pointer(&mut self, team_id: String, skill_id: String) {
+        let caller = env::predecessor_account_id();
+        
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&skill_id);
+        
+        // Validate team write permission
+        self.validate_team_write_permission(&team_id, &caller);
+
+        let composite_key = format!("{}:{}", team_id, skill_id);
+
+        if !self.team_skill_pointers.contains_key(&composite_key) {
+            env::panic_str("VAULT_ERROR_NOT_FOUND");
+        }
+
+        let pointer = self.team_skill_pointers.get(&composite_key).unwrap();
+        let mut bytes_freed = 0u64;
+
+        // Removing key-value pair in team_skill_pointers
+        let key_size = 1 + 4 + composite_key.len() as u64;
+        let val_size = pointer.serialized_size();
+        bytes_freed += key_size + val_size + 40;
+
+        // Remove from enumeration list
+        if let Some(mut list) = self.team_skill_id_lists.get(&team_id).cloned() {
+            if let Some(pos) = list.iter().position(|x| x == &skill_id) {
+                list.swap_remove(pos);
+                if list.is_empty() {
+                    self.team_skill_id_lists.remove(&team_id);
+                    // Freeing entire list entry
+                    let list_key_size = 1 + 4 + team_id.len() as u64;
+                    let list_val_size = 4 + 4 + skill_id.len() as u64;
+                    bytes_freed += list_key_size + list_val_size + 40;
+                } else {
+                    self.team_skill_id_lists.insert(team_id.clone(), list);
+                    // Freeing single element from Vec
+                    bytes_freed += 4 + skill_id.len() as u64;
+                }
+            }
+        }
+
+        self.team_skill_pointers.remove(&composite_key);
+
+        // Process storage refund
+        self._refund_released_storage(caller, bytes_freed);
+    }
+
+    /// @notice Returns a paginated list of skill IDs for a team.
+    /// @dev Requires team membership.
+    /// @param team_id The team to list skill IDs for.
+    /// @return Vec of skill ID strings.
+    pub fn list_team_skill_ids(&self, team_id: String) -> Vec<String> {
+        // Validate team exists
+        if !self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_NOT_FOUND");
+        }
+        
+        // Validate caller is a team member
+        let caller = env::predecessor_account_id();
+        self.validate_team_membership(&team_id, &caller);
+        
+        self.team_skill_id_lists.get(&team_id).cloned().unwrap_or_default()
+    }
+
+    /// @notice Fetches a single team skill pointer.
+    /// @dev Requires team membership.
+    /// @param team_id The team that owns the skill.
+    /// @param skill_id Unique identifier for the skill.
+    /// @return Option<VaultPointer>.
+    pub fn get_team_skill_pointer(&self, team_id: String, skill_id: String) -> Option<VaultPointer> {
+        // Validate inputs
+        vault::validate_team_id(&team_id);
+        vault::validate_identifier(&skill_id);
+        
+        // Validate caller is a team member
+        let caller = env::predecessor_account_id();
+        self.validate_team_membership(&team_id, &caller);
+
+        let composite_key = format!("{}:{}", team_id, skill_id);
+        self.team_skill_pointers.get(&composite_key).cloned()
+    }
+
+    // //////////////////////////////////////////////////////////////
     //                      VIEW METHODS
     // //////////////////////////////////////////////////////////////
 
