@@ -463,6 +463,194 @@ impl AegisContract {
     }
 
     // //////////////////////////////////////////////////////////////
+    //                      TEAM MANAGEMENT METHODS
+    // //////////////////////////////////////////////////////////////
+
+    /// @notice Creates a new team with the calling account as the admin.
+    /// @dev Validates team_id, ensures it doesn't exist, and initializes team storage.
+    /// @param team_id Unique team identifier (alphanumeric + hyphen/underscore).
+    /// @param name Human-readable team name.
+    pub fn create_team(&mut self, team_id: String, name: String) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate team_id format
+        vault::validate_team_id(&team_id);
+        
+        // Ensure team doesn't already exist
+        if self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_ALREADY_EXISTS");
+        }
+        
+        // Create team metadata
+        let metadata = TeamMetadata {
+            team_id: team_id.clone(),
+            name,
+            created_at: env::block_timestamp_ms(),
+            created_by: caller.clone(),
+        };
+        
+        // Store team metadata
+        self.team_pointers.insert(team_id.clone(), metadata);
+        
+        // Initialize empty lists for team resources
+        self.team_wiki_slug_lists.insert(team_id.clone(), Vec::new());
+        self.team_skill_id_lists.insert(team_id.clone(), Vec::new());
+        
+        // Add creator as first member with Admin permission
+        let mut members = Vec::new();
+        members.push(TeamMember {
+            account_id: caller.clone(),
+            permission: Permission::Admin,
+            joined_at: env::block_timestamp_ms(),
+            added_by: caller,
+        });
+        self.team_members.insert(team_id, members);
+    }
+
+    /// @notice Adds a member to an existing team.
+    /// @dev Requires caller to be a team admin and validates team member limits.
+    /// @param team_id The team to add the member to.
+    /// @param account_id NEAR account ID of the new member.
+    /// @param permission Initial permission level (Read, Write, or Admin).
+    #[payable]
+    pub fn add_team_member(&mut self, team_id: String, account_id: AccountId, permission: Permission) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate team exists
+        if !self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_NOT_FOUND");
+        }
+        
+        // Validate caller is admin
+        self.validate_team_admin_permission(&team_id, &caller);
+        
+        // Validate permission enum
+        vault::validate_permission(&permission);
+        
+        // Check member limit
+        if let Some(members) = self.team_members.get(&team_id) {
+            if members.len() >= vault::MAX_TEAM_MEMBERS {
+                env::panic_str("TEAM_MEMBER_LIMIT_REACHED");
+            }
+        }
+        
+        // Check if already a member
+        if self.is_team_member(&team_id, &account_id) {
+            env::panic_str("TEAM_MEMBER_ALREADY_EXISTS");
+        }
+        
+        // Add new member
+        let mut members = self.team_members.get(&team_id).cloned().unwrap_or_default();
+        members.push(TeamMember {
+            account_id,
+            permission,
+            joined_at: env::block_timestamp_ms(),
+            added_by: caller,
+        });
+        self.team_members.insert(team_id, members);
+    }
+
+    /// @notice Removes a member from a team.
+    /// @dev Requires caller to be a team admin. Cannot remove self.
+    /// @param team_id The team to remove the member from.
+    /// @param account_id NEAR account ID of the member to remove.
+    pub fn remove_team_member(&mut self, team_id: String, account_id: AccountId) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate team exists
+        if !self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_NOT_FOUND");
+        }
+        
+        // Validate caller is admin
+        self.validate_team_admin_permission(&team_id, &caller);
+        
+        // Cannot remove self
+        if account_id == caller {
+            env::panic_str("TEAM_CANNOT_REMOVE_SELF");
+        }
+        
+        // Remove member
+        if let Some(mut members) = self.team_members.get(&team_id).cloned() {
+            if let Some(pos) = members.iter().position(|m| m.account_id == account_id) {
+                members.remove(pos);
+                
+                // If no members left, delete the team
+                if members.is_empty() {
+                    self.team_pointers.remove(&team_id);
+                    self.team_wiki_slug_lists.remove(&team_id);
+                    self.team_skill_id_lists.remove(&team_id);
+                    self.team_members.remove(&team_id);
+                } else {
+                    self.team_members.insert(team_id, members);
+                }
+            }
+        }
+    }
+
+    /// @notice Updates a team member's permission level.
+    /// @dev Requires caller to be a team admin. Cannot reduce own permission.
+    /// @param team_id The team containing the member.
+    /// @param account_id NEAR account ID of the member to update.
+    /// @param permission New permission level.
+    pub fn update_team_member_permission(&mut self, team_id: String, account_id: AccountId, permission: Permission) {
+        let caller = env::predecessor_account_id();
+        
+        // Validate team exists
+        if !self.team_pointers.contains_key(&team_id) {
+            env::panic_str("TEAM_NOT_FOUND");
+        }
+        
+        // Validate caller is admin
+        self.validate_team_admin_permission(&team_id, &caller);
+        
+        // Validate permission enum
+        vault::validate_permission(&permission);
+        
+        // Cannot reduce own permission
+        if account_id == caller {
+            let current_permission = self.get_team_member(&team_id, &caller)
+                .map(|m| m.permission)
+                .unwrap_or(Permission::Read);
+            
+            // Check if trying to reduce own permission
+            if !matches!((current_permission, &permission),
+                (Permission::Admin, &Permission::Admin) |
+                (Permission::Write, &Permission::Write) |
+                (Permission::Write, &Permission::Admin) |
+                (Permission::Read, &Permission::Read) |
+                (Permission::Read, &Permission::Write) |
+                (Permission::Read, &Permission::Admin)) {
+                env::panic_str("TEAM_CANNOT_REDUCE_OWN_PERMISSION");
+            }
+        }
+        
+        // Update permission
+        if let Some(mut members) = self.team_members.get(&team_id).cloned() {
+            if let Some(member) = members.iter_mut().find(|m| m.account_id == account_id) {
+                member.permission = permission;
+                self.team_members.insert(team_id, members);
+            }
+        }
+    }
+
+    /// @notice Lists all members of a team.
+    /// @dev Returns an empty Vec if team doesn't exist.
+    /// @param team_id The team to list members from.
+    /// @return Vec of TeamMember objects.
+    pub fn list_team_members(&self, team_id: String) -> Vec<TeamMember> {
+        self.team_members.get(&team_id).cloned().unwrap_or_default()
+    }
+
+    /// @notice Gets metadata for a specific team.
+    /// @dev Returns None if team doesn't exist.
+    /// @param team_id The team to retrieve metadata for.
+    /// @return Option<TeamMetadata>.
+    pub fn get_team_metadata(&self, team_id: String) -> Option<TeamMetadata> {
+        self.team_pointers.get(&team_id).cloned()
+    }
+
+    // //////////////////////////////////////////////////////////////
     //                      TEAM ACCESS HELPERS
     // //////////////////////////////////////////////////////////////
 
