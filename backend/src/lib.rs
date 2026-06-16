@@ -2,6 +2,8 @@ use near_sdk::store::LookupMap;
 use near_sdk::{env, near, AccountId, PanicOnDefault, Promise};
 
 mod vault;
+#[cfg(test)]
+mod vault_tests;
 pub mod zdr_firewall;
 
 use vault::VaultPointer;
