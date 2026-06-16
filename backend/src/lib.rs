@@ -8,6 +8,43 @@ pub mod zdr_firewall;
 
 use vault::VaultPointer;
 
+/// @notice Team metadata stored on-chain.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeamMetadata {
+    /// @notice Unique team identifier (alphanumeric + hyphen/underscore).
+    pub team_id: String,
+    /// @notice Human-readable team name.
+    pub name: String,
+    /// @notice Unix timestamp in milliseconds when the team was created.
+    pub created_at: u64,
+    /// @notice NEAR account ID of the team creator.
+    pub created_by: AccountId,
+}
+
+/// @notice Permission level for team members.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Permission {
+    Read,
+    Write,
+    Admin,
+}
+
+/// @notice Team member record with permissions and metadata.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeamMember {
+    /// @notice NEAR account ID of the team member.
+    pub account_id: AccountId,
+    /// @notice Permission level (Read, Write, Admin).
+    pub permission: Permission,
+    /// @notice Unix timestamp in milliseconds when the member joined.
+    pub joined_at: u64,
+    /// @notice NEAR account ID of the member who added this user.
+    pub added_by: AccountId,
+}
+
 #[near(serializers = [borsh])]
 #[derive(near_sdk::BorshStorageKey)]
 pub enum StorageKey {
@@ -15,6 +52,12 @@ pub enum StorageKey {
     SkillPointers,
     WikiSlugLists,
     SkillIdLists,
+    TeamPointers,
+    TeamWikiPointers,
+    TeamSkillPointers,
+    TeamWikiSlugLists,
+    TeamSkillIdLists,
+    TeamMembers,
 }
 
 // //////////////////////////////////////////////////////////////
@@ -49,6 +92,24 @@ pub struct AegisContract {
 
     /// @notice Tracks the list of skill IDs owned by each AccountId for enumeration.
     skill_id_lists: LookupMap<AccountId, Vec<String>>,
+
+    /// @notice Mapping of team IDs to team metadata.
+    team_pointers: LookupMap<String, TeamMetadata>,
+
+    /// @notice Partitioned mapping of team wiki page composite keys ("{team_id}:{slug}") to their Walrus pointers.
+    team_wiki_pointers: LookupMap<String, VaultPointer>,
+
+    /// @notice Partitioned mapping of team skill composite keys ("{team_id}:{skill_id}") to their Walrus pointers.
+    team_skill_pointers: LookupMap<String, VaultPointer>,
+
+    /// @notice Tracks the list of wiki slugs owned by each team for enumeration.
+    team_wiki_slug_lists: LookupMap<String, Vec<String>>,
+
+    /// @notice Tracks the list of skill IDs owned by each team for enumeration.
+    team_skill_id_lists: LookupMap<String, Vec<String>>,
+
+    /// @notice Mapping of team IDs to lists of team members with their permissions.
+    team_members: LookupMap<String, Vec<TeamMember>>,
 }
 
 #[near]
@@ -65,6 +126,12 @@ impl AegisContract {
             skill_pointers: LookupMap::new(StorageKey::SkillPointers),
             wiki_slug_lists: LookupMap::new(StorageKey::WikiSlugLists),
             skill_id_lists: LookupMap::new(StorageKey::SkillIdLists),
+            team_pointers: LookupMap::new(StorageKey::TeamPointers),
+            team_wiki_pointers: LookupMap::new(StorageKey::TeamWikiPointers),
+            team_skill_pointers: LookupMap::new(StorageKey::TeamSkillPointers),
+            team_wiki_slug_lists: LookupMap::new(StorageKey::TeamWikiSlugLists),
+            team_skill_id_lists: LookupMap::new(StorageKey::TeamSkillIdLists),
+            team_members: LookupMap::new(StorageKey::TeamMembers),
         }
     }
 
