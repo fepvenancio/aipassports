@@ -463,6 +463,58 @@ impl AegisContract {
     }
 
     // //////////////////////////////////////////////////////////////
+    //                      TEAM ACCESS HELPERS
+    // //////////////////////////////////////////////////////////////
+
+    /// @notice Finds and returns a TeamMember by account_id in a team's member list.
+    /// @dev Returns None if the team doesn't exist or the account is not a member.
+    fn get_team_member(&self, team_id: &str, account_id: &AccountId) -> Option<TeamMember> {
+        self.team_members
+            .get(team_id)
+            .and_then(|members| {
+                members.iter().find(|member| &member.account_id == account_id).cloned()
+            })
+    }
+
+    /// @notice Checks if an account has Admin permission in a team.
+    /// @dev Returns false if the team doesn't exist or account is not a member.
+    fn is_team_admin(&self, team_id: &str, account_id: &AccountId) -> bool {
+        self.get_team_member(team_id, account_id)
+            .map_or(false, |member| matches!(member.permission, Permission::Admin))
+    }
+
+    /// @notice Checks if an account is a member of a team (any permission level).
+    /// @dev Returns false if the team doesn't exist or account is not a member.
+    fn is_team_member(&self, team_id: &str, account_id: &AccountId) -> bool {
+        self.get_team_member(team_id, account_id).is_some()
+    }
+
+    /// @notice Validates that the caller is a member of the specified team.
+    /// @dev Panics with 'TEAM_MEMBER_REQUIRED' if validation fails.
+    fn validate_team_membership(&self, team_id: &str, caller: &AccountId) {
+        if !self.is_team_member(team_id, caller) {
+            env::panic_str("TEAM_MEMBER_REQUIRED");
+        }
+    }
+
+    /// @notice Validates that the caller has Write or Admin permission in the team.
+    /// @dev Panics with 'TEAM_PERMISSION_DENIED' if validation fails.
+    fn validate_team_write_permission(&self, team_id: &str, caller: &AccountId) {
+        let member = self.get_team_member(team_id, caller);
+        if !member.map_or(false, |m| matches!(m.permission, Permission::Write | Permission::Admin)) {
+            env::panic_str("TEAM_PERMISSION_DENIED");
+        }
+    }
+
+    /// @notice Validates that the caller has Admin permission in the team.
+    /// @dev Panics with 'TEAM_PERMISSION_DENIED' if validation fails.
+    fn validate_team_admin_permission(&self, team_id: &str, caller: &AccountId) {
+        if !self.is_team_admin(team_id, caller) {
+            env::panic_str("TEAM_PERMISSION_DENIED");
+        }
+    }
+
+    // //////////////////////////////////////////////////////////////
     //                      INTERNAL UTILITIES
     // //////////////////////////////////////////////////////////////
 
