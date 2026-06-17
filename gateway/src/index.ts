@@ -858,4 +858,239 @@ app.get("/.well-known/mcp", (c) =>
   }),
 );
 
+/* //////////////////////////////////////////////////////////////
+                   MANAGED SAAS CONTROL PLANE ROUTER
+//////////////////////////////////////////////////////////////*/
+
+async function getAuthenticatedUser(c: Context<any>): Promise<string | null> {
+  const authHeader = c.req.header("Authorization");
+  const xSessionId = c.req.header("x-session-id");
+  let sessionId = "";
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    sessionId = authHeader.substring(7);
+  } else if (xSessionId) {
+    sessionId = xSessionId;
+  }
+
+  if (!sessionId) return null;
+
+  const sessionStr = await c.env.SESSIONS_KV.get(`session:${sessionId}`);
+  if (sessionStr) {
+    const session = JSON.parse(sessionStr) as { nearAccountId: string; expiresAt: number };
+    if (Date.now() <= session.expiresAt) {
+      return session.nearAccountId;
+    }
+  }
+
+  if (c.env.DB) {
+    try {
+      const userRow = (await c.env.DB.prepare(
+        "SELECT near_account_id FROM users WHERE api_key = ?"
+      ).bind(sessionId).first()) as { near_account_id: string } | null;
+      if (userRow) {
+        return userRow.near_account_id;
+      }
+    } catch (dbErr) {
+      // Ignore
+    }
+  }
+
+  return null;
+}
+
+app.get("/api/user", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) {
+    return c.json({ error: "UNAUTHORIZED" }, 401);
+  }
+
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+
+  try {
+    const user = await c.env.DB.prepare(
+      "SELECT near_account_id, api_key, tee_endpoint, subscription_status, storage_used_bytes, storage_limit_bytes FROM users WHERE near_account_id = ?"
+    ).bind(accountId).first<{
+      near_account_id: string;
+      api_key: string;
+      tee_endpoint: string;
+      subscription_status: string;
+      storage_used_bytes: number;
+      storage_limit_bytes: number;
+    }>();
+
+    if (!user) {
+      return c.json({ error: "USER_NOT_REGISTERED" }, 404);
+    }
+
+    return c.json({
+      success: true,
+      nearAccountId: user.near_account_id,
+      apiKey: user.api_key,
+      teeEndpoint: user.tee_endpoint,
+      subscriptionStatus: user.subscription_status,
+      storageUsedBytes: user.storage_used_bytes || 0,
+      storageLimitBytes: user.storage_limit_bytes || 10485760,
+    });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/register", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) {
+    return c.json({ error: "UNAUTHORIZED" }, 401);
+  }
+
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+
+  let body: { teeEndpoint?: string } = {};
+  try {
+    body = await c.req.json().catch(() => ({}));
+  } catch {
+    // Ignore
+  }
+
+  try {
+    const existingUser = await c.env.DB.prepare(
+      "SELECT near_account_id, api_key, tee_endpoint, subscription_status, storage_used_bytes, storage_limit_bytes FROM users WHERE near_account_id = ?"
+    ).bind(accountId).first<{
+      near_account_id: string;
+      api_key: string;
+      tee_endpoint: string;
+      subscription_status: string;
+      storage_used_bytes: number;
+      storage_limit_bytes: number;
+    }>();
+
+    if (existingUser) {
+      return c.json({
+        success: true,
+        nearAccountId: existingUser.near_account_id,
+        apiKey: existingUser.api_key,
+        teeEndpoint: existingUser.tee_endpoint,
+        subscriptionStatus: existingUser.subscription_status,
+        storageUsedBytes: existingUser.storage_used_bytes || 0,
+        storageLimitBytes: existingUser.storage_limit_bytes || 10485760,
+      });
+    }
+
+    const apiKey = "ak_aegis_" + arrayBufferToBase64Url(crypto.getRandomValues(new Uint8Array(24)).buffer);
+    const teeEndpoint = body.teeEndpoint || `https://${accountId}.aegis-tee.near.ai`;
+
+    await c.env.DB.prepare(
+      "INSERT INTO users (near_account_id, api_key, tee_endpoint, subscription_status, storage_used_bytes, storage_limit_bytes, created_at) VALUES (?, ?, ?, 'free', 0, 10485760, ?)"
+    ).bind(accountId, apiKey, teeEndpoint, Date.now()).run();
+
+    return c.json({
+      success: true,
+      nearAccountId: accountId,
+      apiKey,
+      teeEndpoint,
+      subscriptionStatus: "free",
+      storageUsedBytes: 0,
+      storageLimitBytes: 10485760,
+    });
+  } catch (err) {
+    return c.json({ error: "REGISTRATION_FAILED", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/keys/generate", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) {
+    return c.json({ error: "UNAUTHORIZED" }, 401);
+  }
+
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+
+  try {
+    const apiKey = "ak_aegis_" + arrayBufferToBase64Url(crypto.getRandomValues(new Uint8Array(24)).buffer);
+    await c.env.DB.prepare(
+      "UPDATE users SET api_key = ? WHERE near_account_id = ?"
+    ).bind(apiKey, accountId).run();
+
+    return c.json({
+      success: true,
+      apiKey,
+    });
+  } catch (err) {
+    return c.json({ error: "KEY_GENERATION_FAILED", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/billing/subscribe", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) {
+    return c.json({ error: "UNAUTHORIZED" }, 401);
+  }
+
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+
+  let body: { tier?: "free" | "developer" | "team" };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "INVALID_JSON" }, 400);
+  }
+
+  const { tier } = body;
+  if (!tier || !["free", "developer", "team"].includes(tier)) {
+    return c.json({ error: "INVALID_TIER" }, 400);
+  }
+
+  let limit = 10485760; // 10MB Free
+  if (tier === "developer") {
+    limit = 524288000; // 500MB
+  } else if (tier === "team") {
+    limit = 2147483648; // 2GB
+  }
+
+  try {
+    await c.env.DB.prepare(
+      "UPDATE users SET subscription_status = ?, storage_limit_bytes = ? WHERE near_account_id = ?"
+    ).bind(tier, limit, accountId).run();
+
+    return c.json({
+      success: true,
+      subscriptionStatus: tier,
+      storageLimitBytes: limit,
+    });
+  } catch (err) {
+    return c.json({ error: "SUBSCRIPTION_UPDATE_FAILED", detail: String(err) }, 500);
+  }
+});
+
+app.get("/api/logs", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) {
+    return c.json({ error: "UNAUTHORIZED" }, 401);
+  }
+
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+
+  try {
+    const { results } = await c.env.DB.prepare(
+      "SELECT timestamp, skill_name, destination, rule_triggered, marker_detected FROM firewall_audit_logs WHERE near_account_id = ? ORDER BY timestamp DESC LIMIT 50"
+    ).bind(accountId).all();
+
+    return c.json({
+      success: true,
+      logs: results,
+    });
+  } catch (err) {
+    return c.json({ error: "LOGS_QUERY_FAILED", detail: String(err) }, 500);
+  }
+});
+
 export default app;

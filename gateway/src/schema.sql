@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS users (
     api_key TEXT UNIQUE NOT NULL,
     tee_endpoint TEXT NOT NULL,
     subscription_status TEXT DEFAULT 'free',
+    storage_used_bytes INTEGER DEFAULT 0,
+    storage_limit_bytes INTEGER DEFAULT 10485760, -- 10MB default
     created_at INTEGER NOT NULL
 );
 

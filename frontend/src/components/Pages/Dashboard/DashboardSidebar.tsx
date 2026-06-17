@@ -2,12 +2,14 @@ import { disconnectWallet } from '../../../near/wallet';
 import type { AuthSession } from '../../../api/types';
 import Button from '../../UI/Button';
 
-export type DashTab = 'wiki' | 'skills' | 'console' | 'settings';
+export type DashTab = 'wiki' | 'skills' | 'console' | 'logs' | 'billing' | 'settings';
 
 const NAV: Array<{ id: DashTab; icon: string; label: string }> = [
   { id: 'wiki',     icon: '📄', label: 'Wiki Pages'   },
   { id: 'skills',  icon: '⚡', label: 'Skill Registry' },
   { id: 'console', icon: '⌨️', label: 'Console'      },
+  { id: 'logs',    icon: '🛡️', label: 'Security Logs' },
+  { id: 'billing', icon: '💳', label: 'Billing & Tiers' },
   { id: 'settings',icon: '⚙️', label: 'Settings'     },
 ];
 

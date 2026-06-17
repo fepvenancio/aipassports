@@ -200,3 +200,144 @@ export async function pingAgent(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Fetches the user profile from the SaaS control plane.
+ */
+export async function getUserProfile(signal?: AbortSignal): Promise<{
+  nearAccountId: string;
+  apiKey: string;
+  teeEndpoint: string;
+  subscriptionStatus: 'free' | 'developer' | 'team';
+  storageUsedBytes: number;
+  storageLimitBytes: number;
+}> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/user`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<any>;
+}
+
+/**
+ * Registers/onboards the user on the SaaS control plane.
+ */
+export async function registerUser(teeEndpoint?: string, signal?: AbortSignal): Promise<{
+  nearAccountId: string;
+  apiKey: string;
+  teeEndpoint: string;
+  subscriptionStatus: 'free' | 'developer' | 'team';
+  storageUsedBytes: number;
+  storageLimitBytes: number;
+}> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    body: JSON.stringify({ teeEndpoint }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<any>;
+}
+
+/**
+ * Regenerates the user's primary API key on the SaaS control plane.
+ */
+export async function regenerateApiKey(signal?: AbortSignal): Promise<{ apiKey: string }> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/keys/generate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<any>;
+}
+
+/**
+ * Subscribes to a pricing tier (Free / Developer / Team) on the SaaS control plane.
+ */
+export async function subscribeTier(tier: 'free' | 'developer' | 'team', signal?: AbortSignal): Promise<{
+  subscriptionStatus: 'free' | 'developer' | 'team';
+  storageLimitBytes: number;
+}> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/billing/subscribe`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    body: JSON.stringify({ tier }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<any>;
+}
+
+/**
+ * Fetches ZDR firewall block audit logs for the user.
+ */
+export async function getFirewallLogs(signal?: AbortSignal): Promise<Array<{
+  timestamp: number;
+  skill_name: string;
+  destination: string;
+  rule_triggered: string;
+  marker_detected: string | null;
+}>> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/logs`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  const data = await res.json() as { logs: any[] };
+  return data.logs;
+}

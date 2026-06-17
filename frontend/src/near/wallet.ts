@@ -196,3 +196,57 @@ export function updateSkillPointer(
 export function removeSkillPointer(skillId: string): Promise<void> {
   return functionCall('remove_skill_pointer', { skill_id: skillId }, BigInt(0));
 }
+
+/** Signs a challenge nonce using the connected wallet. */
+export async function signChallengeMessage(challenge: string): Promise<{ publicKey: string; signature: string }> {
+  const selector = await getSelector();
+  const wallet = await selector.wallet();
+  const accounts = selector.store.getState().accounts;
+  const activeAccount = accounts[0];
+  if (!activeAccount) {
+    throw new Error('No active account connected');
+  }
+
+  // Decode challenge base64url to Uint8Array
+  const base64 = challenge.replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(base64);
+  const nonce = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    nonce[i] = binary.charCodeAt(i);
+  }
+
+  const response = await wallet.signMessage({
+    message: "Authenticate with Aegis Dashboard",
+    recipient: CONTRACT_ID,
+    nonce: nonce as any,
+  });
+
+  if (!response) {
+    throw new Error("Message signing failed or was rejected by the wallet.");
+  }
+
+  // Encode signature to base64url
+  let signatureBase64Url = '';
+  if (typeof response.signature === 'string') {
+    // Standardize base64 to base64url
+    signatureBase64Url = response.signature
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  } else {
+    const sigBytes = new Uint8Array(response.signature as any);
+    let sigBinary = '';
+    for (let i = 0; i < sigBytes.length; i++) {
+      sigBinary += String.fromCharCode(sigBytes[i]);
+    }
+    signatureBase64Url = btoa(sigBinary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  }
+
+  return {
+    publicKey: response.publicKey,
+    signature: signatureBase64Url,
+  };
+}

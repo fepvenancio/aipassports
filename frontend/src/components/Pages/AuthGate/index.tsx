@@ -18,12 +18,13 @@ export default function AuthGate({ onSuccess }: Props) {
   const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // Check if wallet already connected
+  // Check if wallet already connected and session exists
   useEffect(() => {
     getConnectedAccountId()
       .then((id: string | null) => {
-        if (id) {
-          onSuccess({ nearAccountId: id });
+        const token = localStorage.getItem('AEGIS_SESSION_TOKEN');
+        if (id && token) {
+          onSuccess({ nearAccountId: id, sessionId: token });
         }
       })
       .finally(() => {
@@ -41,7 +42,44 @@ export default function AuthGate({ onSuccess }: Props) {
     setError(null);
     try {
       const nearAccountId = await connectWallet();
-      onSuccess({ nearAccountId });
+
+      // 1. Fetch challenge nonce from gateway
+      const base = import.meta.env.DEV ? '/api' : 'https://api.aipassports.xyz';
+      const challengeRes = await fetch(`${base}/auth/challenge`, {
+        method: 'POST',
+      });
+      if (!challengeRes.ok) {
+        throw new Error(`Challenge fetch failed: HTTP ${challengeRes.status}`);
+      }
+      const challengeJson = await challengeRes.json() as { nonce: string };
+      const challenge = challengeJson.nonce;
+
+      // 2. Request user signature via Wallet Selector (NEP-413)
+      const { signChallengeMessage } = await import('../../../near/wallet');
+      const { publicKey, signature } = await signChallengeMessage(challenge);
+
+      // 3. Submit signature to unlock session
+      const unlockRes = await fetch(`${base}/auth/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nearAccountId,
+          publicKey,
+          signature,
+          challenge
+        }),
+      });
+
+      if (!unlockRes.ok) {
+        const errJson = await unlockRes.json().catch(() => ({ error: `HTTP ${unlockRes.status}` })) as { error?: string };
+        throw new Error(errJson.error ?? `Unlock failed: HTTP ${unlockRes.status}`);
+      }
+
+      const unlockJson = await unlockRes.json() as { sessionId: string };
+      const sessionId = unlockJson.sessionId;
+
+      localStorage.setItem('AEGIS_SESSION_TOKEN', sessionId);
+      onSuccess({ nearAccountId, sessionId });
     } catch (e) {
       setStep('error');
       setError((e as Error).message);

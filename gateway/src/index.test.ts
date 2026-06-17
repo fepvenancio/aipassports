@@ -20,7 +20,14 @@ class MemoryKV {
 }
 
 class MockD1Database {
-  users: Array<{ near_account_id: string; api_key: string; tee_endpoint: string }> = [];
+  users: Array<{
+    near_account_id: string;
+    api_key: string;
+    tee_endpoint: string;
+    subscription_status?: string;
+    storage_used_bytes?: number;
+    storage_limit_bytes?: number;
+  }> = [];
   firewall_logs: Array<{
     near_account_id: string;
     timestamp: number;
@@ -43,7 +50,14 @@ class MockD1Database {
             }
             if (query.includes("WHERE near_account_id = ?")) {
               const user = self.users.find(u => u.near_account_id === param);
-              return user ? { tee_endpoint: user.tee_endpoint } : null;
+              return user ? {
+                near_account_id: user.near_account_id,
+                api_key: user.api_key,
+                tee_endpoint: user.tee_endpoint,
+                subscription_status: user.subscription_status || "free",
+                storage_used_bytes: user.storage_used_bytes || 0,
+                storage_limit_bytes: user.storage_limit_bytes || 10485760
+              } : null;
             }
             return null;
           },
@@ -57,6 +71,32 @@ class MockD1Database {
                 rule_triggered: args[4],
                 marker_detected: args[5] ?? null
               });
+              return { success: true };
+            }
+            if (query.includes("INSERT INTO users")) {
+              self.users.push({
+                near_account_id: args[0],
+                api_key: args[1],
+                tee_endpoint: args[2],
+                subscription_status: "free",
+                storage_used_bytes: 0,
+                storage_limit_bytes: 10485760
+              });
+              return { success: true };
+            }
+            if (query.includes("UPDATE users SET subscription_status = ?")) {
+              const user = self.users.find(u => u.near_account_id === args[2]);
+              if (user) {
+                user.subscription_status = args[0];
+                user.storage_limit_bytes = args[1];
+              }
+              return { success: true };
+            }
+            if (query.includes("UPDATE users SET api_key = ?")) {
+              const user = self.users.find(u => u.near_account_id === args[1]);
+              if (user) {
+                user.api_key = args[0];
+              }
               return { success: true };
             }
             return { success: true };
@@ -665,7 +705,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     );
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { result: { content: Array<{ text: string }> } };
+    const body = (await res.json()) as any;
     expect(body.result.content[0].text).toBeDefined();
     
     const healthResult = JSON.parse(body.result.content[0].text);
@@ -721,16 +761,148 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
 
     // Should return 200/OK containing the structured firewallBlock error, or return isError in the tool call response
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { result: { content: Array<{ text: string }>, isError?: boolean } };
+    const body = (await res.json()) as any;
     const toolResult = JSON.parse(body.result.content[0].text);
     expect(toolResult.success).toBe(false);
     expect(toolResult.firewallBlock).toBe(true);
 
     // Verify D1 has recorded the block
     expect(DB.firewall_logs.length).toBe(1);
-    expect(DB.firewall_logs[0].near_account_id).toBe("alice.near");
-    expect(DB.firewall_logs[0].skill_name).toBe("chat_helper");
-    expect(DB.firewall_logs[0].rule_triggered).toBe("SENSITIVE_CONTENT_BLOCKED");
-    expect(DB.firewall_logs[0].marker_detected).toBe("PRIVATE_KEY");
+    expect(DB.firewall_logs[0]!.near_account_id).toBe("alice.near");
+    expect(DB.firewall_logs[0]!.skill_name).toBe("chat_helper");
+    expect(DB.firewall_logs[0]!.rule_triggered).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(DB.firewall_logs[0]!.marker_detected).toBe("PRIVATE_KEY");
+  });
+
+  it("should handle user registration and profile lookup on the control plane", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    // Create a mock active session for "alice.near"
+    const sessionId = "test-session-uuid";
+    const sessionObj = {
+      nearAccountId: "alice.near",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3600 * 1000,
+    };
+    await SESSIONS_KV.put(`session:${sessionId}`, JSON.stringify(sessionObj));
+
+    // 1. Get profile - should return 404 USER_NOT_REGISTERED
+    const resGet1 = await app.request(
+      "/api/user",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${sessionId}`,
+        },
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(resGet1.status).toBe(404);
+    const get1Body = await resGet1.json() as any;
+    expect(get1Body.error).toBe("USER_NOT_REGISTERED");
+
+    // 2. Register - should return 200 OK with new API key
+    const resReg = await app.request(
+      "/api/register",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${sessionId}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          teeEndpoint: "https://alice-tee.near.ai"
+        })
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(resReg.status).toBe(200);
+    const regBody = await resReg.json() as any;
+    expect(regBody.success).toBe(true);
+    expect(regBody.apiKey).toContain("ak_aegis_");
+    expect(regBody.subscriptionStatus).toBe("free");
+    expect(regBody.teeEndpoint).toBe("https://alice-tee.near.ai");
+
+    // Verify D1 row exists
+    expect(DB.users.length).toBe(1);
+    expect(DB.users[0]!.near_account_id).toBe("alice.near");
+    expect(DB.users[0]!.api_key).toBe(regBody.apiKey);
+
+    // 3. Get profile again - should return 200 OK
+    const resGet2 = await app.request(
+      "/api/user",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${sessionId}`,
+        },
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(resGet2.status).toBe(200);
+    const get2Body = await resGet2.json() as any;
+    expect(get2Body.success).toBe(true);
+    expect(get2Body.nearAccountId).toBe("alice.near");
+    expect(get2Body.apiKey).toBe(regBody.apiKey);
+  });
+
+  it("should handle billing upgrades and API key regeneration", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    const sessionId = "test-session-uuid";
+    const sessionObj = {
+      nearAccountId: "alice.near",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3600 * 1000,
+    };
+    await SESSIONS_KV.put(`session:${sessionId}`, JSON.stringify(sessionObj));
+
+    // Register user first
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_old_key",
+      tee_endpoint: "https://alice-tee.near.ai"
+    });
+
+    // 1. Upgrade subscription to developer tier
+    const resSub = await app.request(
+      "/api/billing/subscribe",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${sessionId}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          tier: "developer"
+        })
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(resSub.status).toBe(200);
+    const subBody = await resSub.json() as any;
+    expect(subBody.success).toBe(true);
+    expect(subBody.subscriptionStatus).toBe("developer");
+    expect(subBody.storageLimitBytes).toBe(524288000);
+
+    // 2. Regenerate API key
+    const resKey = await app.request(
+      "/api/keys/generate",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${sessionId}`,
+        },
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(resKey.status).toBe(200);
+    const keyBody = await resKey.json() as any;
+    expect(keyBody.apiKey).toContain("ak_aegis_");
+    expect(keyBody.apiKey).not.toBe("ak_old_key");
   });
 });

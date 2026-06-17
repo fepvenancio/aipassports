@@ -15,6 +15,7 @@ export interface VaultPointer {
  */
 export interface AuthSession {
   nearAccountId: string;
+  sessionId?: string;
 }
 
 // ─── Wiki ─────────────────────────────────────────────────────────────────────

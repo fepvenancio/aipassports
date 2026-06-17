@@ -5,6 +5,8 @@ const TAB_LABEL: Record<DashTab, string> = {
   wiki:     'Wiki Memory',
   skills:   'Skill Registry',
   console:  'Execution Console',
+  logs:     'Firewall Compliance Logs',
+  billing:  'Billing & Subscription',
   settings: 'Settings',
 };
 

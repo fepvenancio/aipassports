@@ -18,9 +18,20 @@ const STATUS_LABEL: Record<string, string> = {
 export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) {
   const { state, hasUnsavedChanges, selectPage, startNewPage, savePage, deletePage, setContent } = useWiki(nearAccountId);
   const [newSlug, setNewSlug] = useState('');
+  const [previewMode, setPreviewMode] = useState(false);
 
   const isBusy = state.status !== 'idle' && state.status !== 'error';
   const statusLabel = STATUS_LABEL[state.status];
+
+  function handleSelect(slug: string) {
+    setPreviewMode(false);
+    selectPage(slug);
+  }
+
+  function handleNew() {
+    setPreviewMode(false);
+    startNewPage();
+  }
 
   async function handleSave() {
     const slug = state.isNewPage ? newSlug : state.selectedSlug!;
@@ -41,7 +52,7 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
           <Button
             variant="outline"
             size="xs"
-            onClick={startNewPage}
+            onClick={handleNew}
           >
             + New
           </Button>
@@ -63,7 +74,7 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
                 return (
                   <Button
                     key={slug}
-                    onClick={() => selectPage(slug)}
+                    onClick={() => handleSelect(slug)}
                     variant={active ? 'secondary' : 'ghost'}
                     className={`w-full flex items-center gap-2.5 justify-start text-xs font-mono truncate px-3 py-2 ${
                       active ? 'bg-slate-950 border border-slate-800 text-cyan-400 font-semibold shadow-inner' : ''
@@ -83,7 +94,7 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
       <Card className="flex-1 flex flex-col overflow-hidden">
         
         {!state.isNewPage && !state.selectedSlug ? (
-          <EmptyEditor onNew={startNewPage} />
+          <EmptyEditor onNew={handleNew} />
         ) : (
           <>
             {/* Toolbar Header */}
@@ -111,6 +122,18 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
                   <Badge variant="warning" className="text-[9px] px-2 py-0.5 select-none font-semibold">
                     UNSAVED
                   </Badge>
+                )}
+
+                {/* Preview/Edit Toggle */}
+                {!state.isNewPage && state.selectedSlug && (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => setPreviewMode(!previewMode)}
+                    className="shrink-0"
+                  >
+                    {previewMode ? '📝 Edit' : '👁️ Preview'}
+                  </Button>
                 )}
               </div>
 
@@ -168,6 +191,10 @@ export default function WikiPanel({ nearAccountId }: { nearAccountId: string }) 
               <div className="flex-grow p-6">
                 <SkeletonText lines={8} />
               </div>
+            ) : previewMode ? (
+              <div className="flex-grow overflow-y-auto p-6 leading-relaxed text-slate-100 markdown-preview select-text">
+                {renderMarkdown(state.content || '')}
+              </div>
             ) : (
               <textarea
                 id="editor-wiki-content"
@@ -203,4 +230,76 @@ function EmptyEditor({ onNew }: { onNew: () => void }) {
       </Button>
     </div>
   );
+}
+
+// ─── Simple Custom Markdown Renderer ──────────────────────────────────────────
+function renderMarkdown(md: string) {
+  if (!md) return null;
+  const lines = md.split('\n');
+  let inCodeBlock = false;
+  let codeContent = '';
+
+  const rendered = lines.map((line, index) => {
+    if (line.trim().startsWith('```')) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        const code = codeContent;
+        codeContent = '';
+        return (
+          <pre key={index} className="bg-slate-950 border border-slate-900 rounded-lg p-4 my-3 font-mono text-xs text-cyan-400 overflow-x-auto select-text">
+            <code>{code}</code>
+          </pre>
+        );
+      } else {
+        inCodeBlock = true;
+        return null;
+      }
+    }
+
+    if (inCodeBlock) {
+      codeContent += line + '\n';
+      return null;
+    }
+
+    if (line.startsWith('# ')) {
+      return <h1 key={index} className="text-2xl font-bold text-slate-100 border-b border-slate-800 pb-2 mt-6 mb-4">{parseInline(line.slice(2))}</h1>;
+    }
+    if (line.startsWith('## ')) {
+      return <h2 key={index} className="text-xl font-bold text-slate-100 mt-5 mb-3">{parseInline(line.slice(3))}</h2>;
+    }
+    if (line.startsWith('### ')) {
+      return <h3 key={index} className="text-base font-bold text-slate-200 mt-4 mb-2">{parseInline(line.slice(4))}</h3>;
+    }
+    if (line.trim().startsWith('- ') || line.trim().startsWith('* ')) {
+      return (
+        <li key={index} className="ml-5 list-disc text-slate-300 text-sm py-1 font-sans leading-relaxed">
+          {parseInline(line.trim().slice(2))}
+        </li>
+      );
+    }
+    if (line.trim() === '') {
+      return <div key={index} className="h-3" />;
+    }
+
+    return (
+      <p key={index} className="text-slate-300 text-sm py-1.5 leading-relaxed font-sans select-text">
+        {parseInline(line)}
+      </p>
+    );
+  }).filter(el => el !== null);
+
+  return <div className="space-y-1 font-sans">{rendered}</div>;
+}
+
+function parseInline(text: string): React.ReactNode[] {
+  const parts = text.split(/(\*\*.*?\*\*|`.*?`)/);
+  return parts.map((part, idx) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={idx} className="font-bold text-slate-100">{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return <code key={idx} className="bg-slate-900 border border-slate-800/80 px-1.5 py-0.5 rounded font-mono text-xs text-cyan-300">{part.slice(1, -1)}</code>;
+    }
+    return part;
+  });
 }
