@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use zeroize::Zeroizing;
@@ -128,17 +128,25 @@ impl TeamKeyManager {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @notice Encrypts a team DEK for a specific member using their personal DEK.
-    /// @dev Uses AES-256-GCM with a random 12-byte nonce. Returns [nonce][ciphertext].
-    ///      The member_account_id parameter is accepted for API symmetry and future
-    ///      AAD binding but is not currently used in the encryption (nonce provides uniqueness).
+    /// @dev Uses AES-256-GCM with a random 12-byte nonce and the member's NEAR account ID
+    ///      bound as Additional Authenticated Data (AAD). The AAD commitment means any
+    ///      substitution of this ciphertext under a different member's identity will fail
+    ///      GCM tag verification — closing the cross-member ciphertext swap attack.
+    ///
+    ///      AUDIT-H2 FIX: `_member_account_id` is now fully bound as AAD.
+    ///      Previous code left the parameter unused (prefixed with `_`), so the GCM tag
+    ///      was computed only over the ciphertext. An attacker who controls the in-memory
+    ///      cache could swap Alice's entry under Bob's slot and the tag would still pass.
+    ///      With AAD = member_account_id.as_bytes(), the tag is bound to the identity.
+    ///
     /// @param team_dek 32-byte team DEK to encrypt.
-    /// @param _member_account_id NEAR account ID of the member (reserved for future AAD).
+    /// @param member_account_id NEAR account ID of the member — bound as GCM AAD.
     /// @param member_dek 32-byte member personal DEK used as the encryption key.
-    /// @return Encrypted team DEK: [12-byte nonce][ciphertext].
+    /// @return Encrypted team DEK: [12-byte nonce][ciphertext+tag].
     pub fn encrypt_team_dek_for_member(
         &self,
         team_dek: &[u8],
-        _member_account_id: &AccountId,
+        member_account_id: &AccountId,
         member_dek: &[u8; 32],
     ) -> Vec<u8> {
         let cipher = Aes256Gcm::new(member_dek.into());
@@ -146,11 +154,15 @@ impl TeamKeyManager {
         rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
+        // AUDIT-H2: Bind member identity as AAD so the GCM tag commits to this specific member.
         let ciphertext = cipher
-            .encrypt(nonce, team_dek)
+            .encrypt(nonce, Payload {
+                msg: team_dek,
+                aad: member_account_id.as_bytes(),
+            })
             .expect("AES-GCM encryption should not fail with valid inputs");
 
-        // Return nonce + ciphertext
+        // Return nonce + ciphertext+tag
         let mut result = Vec::with_capacity(12 + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
@@ -160,14 +172,22 @@ impl TeamKeyManager {
 
     /// @notice Decrypts a team DEK for a specific member using their personal DEK.
     /// @dev Extracts nonce from the first 12 bytes, decrypts the remainder.
-    ///      Returns None on any decryption failure (wrong key, corrupted ciphertext, etc.).
-    /// @param encrypted_team_dek Encrypted DEK: [12-byte nonce][ciphertext].
+    ///      The member_account_id MUST match the one used during encryption (AAD check).
+    ///      Returns None on any decryption failure (wrong key, wrong AAD, corrupted data).
+    ///
+    ///      AUDIT-H2 FIX: Now requires `member_account_id` for AAD verification.
+    ///      GCM authentication will reject any ciphertext that was encrypted for a
+    ///      different member, even if the member_dek is correct.
+    ///
+    /// @param encrypted_team_dek Encrypted DEK: [12-byte nonce][ciphertext+tag].
     /// @param member_dek 32-byte member personal DEK used as the decryption key.
+    /// @param member_account_id NEAR account ID — must match AAD used during encryption.
     /// @return Some(plaintext team DEK) on success, None on any failure.
     pub fn decrypt_team_dek_for_member(
         &self,
         encrypted_team_dek: &[u8],
         member_dek: &[u8; 32],
+        member_account_id: &str,
     ) -> Option<Vec<u8>> {
         if encrypted_team_dek.len() < 12 {
             return None;
@@ -178,7 +198,12 @@ impl TeamKeyManager {
 
         let cipher = Aes256Gcm::new(member_dek.into());
 
-        cipher.decrypt(nonce, ciphertext).ok()
+        // AUDIT-H2: Verify AAD — if the ciphertext was encrypted for a different member,
+        // GCM tag verification will fail here and return None.
+        cipher.decrypt(nonce, Payload {
+            msg: ciphertext,
+            aad: member_account_id.as_bytes(),
+        }).ok()
     }
 
     // ─────────────────────────────────────────────────────────────────────────

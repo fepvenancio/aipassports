@@ -1014,18 +1014,30 @@ impl AegisContract {
     }
 
     /// @notice Lists all members of a team.
-    /// @dev Returns an empty Vec if team doesn't exist.
+    /// @dev AUDIT-H4 FIX: Added caller membership check. Previously this was an open
+    ///      view method — any NEAR account could enumerate the full membership list of
+    ///      any private team, exposing account IDs and permission levels.
+    ///      Now panics with TEAM_MEMBER_REQUIRED for non-members.
     /// @param team_id The team to list members from.
     /// @return Vec of TeamMember objects.
     pub fn list_team_members(&self, team_id: String) -> Vec<TeamMember> {
+        let caller = env::predecessor_account_id();
+        self.validate_team_membership(&team_id, &caller);
         self.team_members.get(&team_id).cloned().unwrap_or_default()
     }
 
     /// @notice Gets metadata for a specific team.
-    /// @dev Returns None if team doesn't exist.
+    /// @dev AUDIT-H4 FIX: Added caller membership check. Previously this was an open
+    ///      view method — any NEAR account could read the team name and metadata of any
+    ///      team without being a member. Now returns None gracefully for non-members
+    ///      (does not panic — returning None leaks no information beyond "team not visible").
     /// @param team_id The team to retrieve metadata for.
-    /// @return Option<TeamMetadata>.
+    /// @return Option<TeamMetadata> — None if team doesn't exist OR caller is not a member.
     pub fn get_team_metadata(&self, team_id: String) -> Option<TeamMetadata> {
+        let caller = env::predecessor_account_id();
+        if !self.internal_is_team_member(&team_id, &caller) {
+            return None; // Graceful non-disclosure — not a panic
+        }
         self.team_pointers.get(&team_id).cloned()
     }
 

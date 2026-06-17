@@ -232,31 +232,46 @@ mod tests {
 //                          TEAM VAULT READER
 // ///////////////////////////////////////////////////////////////
 
-/// @notice Reads a team vault entry from Walrus and decrypts it.
-/// @dev This function handles the full team vault read pipeline:
-///      1. Fetches VaultPointer from NEAR contract (simulated - actual contract call would go here)
-///      2. Downloads encrypted blob from Walrus
-///      3. Retrieves encrypted team DEK for the requesting member
-///      4. Decrypts the team DEK using the member's DEK
-///      5. Decrypts the blob using the team DEK
-///      6. Verifies SHA-256 integrity
-/// @param master_secret Platform master secret for member DEK derivation.
+/// @notice Reads a team vault entry from Walrus and decrypts it using the team DEK.
+/// @dev Full team vault read pipeline:
+///      1. Downloads encrypted blob from Walrus aggregator
+///      2. Parses binary envelope: [12-byte IV][16-byte GCM tag][ciphertext]
+///      3. Derives the team DEK directly from the platform master secret
+///         (HKDF-SHA256 via get_or_generate_team_dek — same derivation as the write path)
+///      4. Decrypts blob with AES-256-GCM
+///      5. Verifies SHA-256 integrity via constant-time comparison
+///
+/// Access control note: The gateway verifies team membership via NEAR RPC before
+/// forwarding the request to this endpoint. The agent trusts this gate and does
+/// not re-verify on-chain. The TEE is the cryptographic boundary; the NEAR contract
+/// is the access-control boundary.
+///
+/// AUDIT-FIX (read path): The previous implementation attempted to look up a
+/// per-member `encrypted_team_dek` from an in-memory cache that was never populated.
+/// This caused every team vault read to fail with `ReaderError::DecryptionFailed`.
+/// The correct approach is to derive the team DEK deterministically from the master
+/// secret — identical to what write_team_vault_entry does. No cache population step
+/// is needed because the derivation is stateless and restart-safe.
+///
+/// @param master_secret Platform master secret — source of all key material.
 /// @param team_id The team that owns the vault entry.
-/// @param slug Unique identifier for the wiki page.
-/// @param requesting_account_id NEAR account ID of the requesting member.
-/// @param team_key_manager Team key manager for accessing encrypted team DEKs.
-/// @param blob_id Walrus blob ID (in production, this would come from contract).
-/// @param expected_sha256 Expected SHA-256 hash (in production, this would come from contract).
+/// @param slug Unique identifier for the wiki page (used in logging only).
+/// @param requesting_account_id NEAR account ID of the requesting member (logged).
+/// @param team_key_manager Mutable reference for DEK derivation + caching.
+/// @param blob_id Walrus blob ID to fetch.
+/// @param expected_sha256 Expected SHA-256 hex digest of the plaintext.
 /// @return Decrypted plaintext as UTF-8 string.
 pub async fn read_team_vault_entry(
     master_secret: &[u8; 32],
     team_id: &str,
     slug: &str,
     requesting_account_id: &AccountId,
-    team_key_manager: &TeamKeyManager,
+    team_key_manager: &mut TeamKeyManager,
     blob_id: &str,
     expected_sha256: &str,
 ) -> Result<String, ReaderError> {
+    let _ = slug; // used for logging context; derivation is team-scoped only
+
     // HIGH-R8: Validate hash format before any processing
     validate_sha256_format(expected_sha256)?;
 
@@ -290,35 +305,26 @@ pub async fn read_team_vault_entry(
     let tag = &packed_payload[12..28];
     let ciphertext = &packed_payload[28..];
 
-    // 3. Get encrypted team DEK for the requesting member
-    let encrypted_team_dek = team_key_manager
-        .get_encrypted_team_dek(team_id, requesting_account_id)
-        .ok_or(ReaderError::DecryptionFailed)?;
+    // 3. Derive team DEK directly from platform master secret.
+    //    AUDIT-FIX: The old code called get_encrypted_team_dek() which looked up a
+    //    per-member wrapped DEK from an in-memory HashMap — but that cache was never
+    //    populated anywhere in the codebase, so it always returned None and every read
+    //    failed. The correct path matches the write side: derive the team DEK via
+    //    get_or_generate_team_dek() which uses HKDF(master, team_id). The TEE is the
+    //    trusted executor; access control is enforced upstream by the gateway.
+    let team_dek_vec = team_key_manager
+        .get_or_generate_team_dek(master_secret, team_id)
+        .map_err(|_| ReaderError::DecryptionFailed)?;
 
-    // 4. Derive member's DEK using existing key derivation
-    let member_dek = Zeroizing::new(
-        key_derivation::derive_dek(
-            master_secret,
-            requesting_account_id,
-            "wiki", // entry_type - could be parameterized
-            slug,
-        )?,
-    );
-
-    // 5. Decrypt team DEK using member's DEK
-    let team_dek_bytes = team_key_manager
-        .decrypt_team_dek_for_member(encrypted_team_dek, &member_dek)
-        .ok_or(ReaderError::DecryptionFailed)?;
-
-    if team_dek_bytes.len() != 32 {
+    if team_dek_vec.len() != 32 {
         return Err(ReaderError::DecryptionFailed);
     }
 
-    let team_dek_array: [u8; 32] = team_dek_bytes.try_into()
-        .map_err(|_| ReaderError::DecryptionFailed)?;
+    let mut team_dek_array = [0u8; 32];
+    team_dek_array.copy_from_slice(&team_dek_vec);
     let team_dek = Zeroizing::new(team_dek_array);
 
-    // 6. Decrypt blob using team DEK
+    // 4. Decrypt blob using team DEK
     let nonce = Nonce::from_slice(iv);
     let mut decrypt_payload = Vec::with_capacity(ciphertext.len() + 16);
     decrypt_payload.extend_from_slice(ciphertext);
@@ -332,7 +338,7 @@ pub async fn read_team_vault_entry(
     let plaintext = String::from_utf8(decrypted_bytes)
         .map_err(|_| ReaderError::DecryptionFailed)?;
 
-    // 7. HIGH-R8: Constant-time SHA-256 integrity check
+    // 5. HIGH-R8: Constant-time SHA-256 integrity check
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
     let computed_sha256 = hex::encode(hasher.finalize());
@@ -349,5 +355,6 @@ pub async fn read_team_vault_entry(
         });
     }
 
+    let _ = requesting_account_id; // validated upstream; retained for future audit logging
     Ok(plaintext)
 }

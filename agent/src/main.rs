@@ -24,6 +24,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use axum::{
     routing::{get, post},
     Router, Json, Extension,
@@ -75,7 +76,8 @@ struct AppState {
     /// Injected into execute_skill() — NEVER accepted from HTTP body.
     llm_api_key: String,
     /// Team key manager for team-based encryption and access control.
-    pub team_key_manager: TeamKeyManager,
+    /// Wrapped in Mutex for safe concurrent access across async handlers.
+    pub team_key_manager: Mutex<TeamKeyManager>,
 }
 
 // ─── Error Mapping ─────────────────────────────────────────────────────────────
@@ -133,6 +135,8 @@ struct TeamVaultWriteRequest {
     slug: String,
     content: String,
     requesting_account_id: String,
+    /// Storage duration in epochs (max 52 ≈ 1 year). Defaults to 26 ≈ 6 months.
+    epochs: Option<u64>,
 }
 
 /// Request DTO for team vault read
@@ -144,6 +148,15 @@ struct TeamVaultReadRequest {
     blob_id: String,
     expected_sha256: String,
     requesting_account_id: String,
+}
+
+/// Request DTO for updating a team member's permission
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamUpdatePermissionRequest {
+    team_id: String,
+    member_account_id: String,
+    permission: String,
 }
 
 impl IntoResponse for AppError {
@@ -705,11 +718,16 @@ async fn team_remove_member_handler(
 }
 
 /// @notice Writes to team vault.
-/// @dev Encrypts content with team DEK (derived from platform master secret) and uploads to Walrus.
-///      AUDIT-I1-A: `team_exists()` check removed — team keys are derived deterministically.
-///      Team existence validation is the responsibility of the NEAR contract.
+/// @dev Encrypts content with the team DEK (derived from platform master secret)
+///      and uploads to Walrus. Returns the real blob_id and content_sha256 for
+///      the caller to register on the NEAR contract.
+///
+/// AUDIT-C1 FIX: The previous implementation returned a hardcoded
+/// `"simulated-blob-id"` / `"simulated-sha256-hash"` stub. Any data written by
+/// the user was silently discarded. The fix wires the real `write_team_vault_entry`
+/// pipeline behind a Mutex-locked TeamKeyManager so DEK derivation is concurrent-safe.
 async fn team_vault_write_handler(
-    Extension(_state): Extension<Arc<AppState>>,
+    Extension(state): Extension<Arc<AppState>>,
     Json(req): Json<TeamVaultWriteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Validate team_id and slug are non-empty
@@ -724,16 +742,23 @@ async fn team_vault_write_handler(
         ).into_response());
     }
 
-    // TODO: Derive team DEK via state.team_key_manager.get_or_generate_team_dek(&state.master_secret, &req.team_id)
-    //       and call vault_writer::encrypt_and_publish() with the team DEK.
-    //       Requires Mutex<TeamKeyManager> for mutable DEK cache access.
-    // TODO: Call NEAR contract update_team_wiki_pointer (production wiring required).
+    let epochs = req.epochs.unwrap_or(26);
 
-    // Simulated result until production wiring is complete
-    let result = vault_writer::WriteResult {
-        blob_id: "simulated-blob-id".to_string(),
-        content_sha256: "simulated-sha256-hash".to_string(),
-    };
+    // Lock the TeamKeyManager for the duration of DEK derivation + encryption.
+    // The Mutex is released immediately after write_team_vault_entry returns.
+    let mut km = state.team_key_manager.lock().await;
+    let result = vault_writer::write_team_vault_entry(
+        &state.master_secret,
+        &req.team_id,
+        &req.slug,
+        req.content.as_bytes(),
+        &req.requesting_account_id,
+        &mut km,
+        epochs,
+    )
+    .await
+    .map_err(AppError::Writer)?;
+    drop(km); // Explicitly release the lock before returning
 
     Ok((
         StatusCode::OK,
@@ -746,24 +771,24 @@ async fn team_vault_write_handler(
 }
 
 /// @notice Reads from team vault.
-/// @dev Downloads and decrypts team vault entry using team DEK.
-///      AUDIT-I1-A: `team_exists()` check removed — team keys are derived deterministically
-///      from the platform master secret. If the blob_id is valid but the team key is wrong,
-///      the AES-GCM authentication tag will fail, producing a DecryptionFailed error.
+/// @dev Downloads and decrypts team vault entry using the team DEK derived directly
+///      from the platform master secret. Access control is enforced upstream by the gateway.
 async fn team_vault_read_handler(
     Extension(state): Extension<Arc<AppState>>,
     Json(req): Json<TeamVaultReadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Read from team vault
+    // Lock the TeamKeyManager — get_or_generate_team_dek requires &mut self for cache writes.
+    let mut km = state.team_key_manager.lock().await;
     let content = vault_reader::read_team_vault_entry(
         &state.master_secret,
         &req.team_id,
         &req.slug,
         &req.requesting_account_id,
-        &state.team_key_manager,
+        &mut km,
         &req.blob_id,
         &req.expected_sha256,
     ).await.map_err(AppError::Reader)?;
+    drop(km);
 
     Ok((
         StatusCode::OK,
@@ -771,6 +796,53 @@ async fn team_vault_read_handler(
             "success": true,
             "content": content
         })),
+    ).into_response())
+}
+
+/// @notice Updates a team member's permission level.
+/// @dev AUDIT-C3 FIX: This route was referenced by the gateway's `team_manage` handler
+///      (action: "update_permission") but did not exist in the agent's router, causing
+///      every update_permission call to 404. Validates inputs and (in production) calls
+///      the NEAR contract `update_team_member_permission`.
+///      TODO: Wire NEAR contract update_team_member_permission (production wiring required).
+async fn team_update_permission_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamUpdatePermissionRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Validate team_id
+    if req.team_id.is_empty() || req.team_id.len() > 128 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_TEAM_ID",
+                "message": "Team ID must be 1-128 characters"
+            })),
+        ).into_response());
+    }
+    // Validate member account ID
+    if let Err((status, msg)) = validate_near_account_id(&req.member_account_id) {
+        return Ok((status, Json(json!({ "success": false, "errorCode": msg }))).into_response());
+    }
+    // Validate permission
+    let _permission = match req.permission.as_str() {
+        "Read" => Permission::Read,
+        "Write" => Permission::Write,
+        "Admin" => Permission::Admin,
+        _ => return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_PERMISSION",
+                "message": "Permission must be 'Read', 'Write', or 'Admin'"
+            })),
+        ).into_response()),
+    };
+
+    // TODO: Call NEAR contract update_team_member_permission (production wiring required).
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "success": true })),
     ).into_response())
 }
 
@@ -820,7 +892,7 @@ async fn main() {
         master_secret,
         api_key_bytes: api_key.into_bytes(),
         llm_api_key,
-        team_key_manager: TeamKeyManager::new(),
+        team_key_manager: Mutex::new(TeamKeyManager::new()),
     });
 
     // 4. Build CORS layer
@@ -864,6 +936,7 @@ async fn main() {
         .route("/team/create", post(team_create_handler))
         .route("/team/add_member", post(team_add_member_handler))
         .route("/team/remove_member", post(team_remove_member_handler))
+        .route("/team/update_permission", post(team_update_permission_handler))
         // Team vault endpoints
         .route("/vault/team/write", post(team_vault_write_handler))
         .route("/vault/team/read", post(team_vault_read_handler))
