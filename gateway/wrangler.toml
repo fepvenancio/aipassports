@@ -24,3 +24,9 @@ id = "ab73bb8bd9a3486db0d713c3a8c7ad1b"
 [[kv_namespaces]]
 binding = "SESSIONS_KV"
 id = "1905df2470e04bceb31a2da1414aca5b"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aegis_users"
+database_id = "8cc8b9b4-b9c1-4c7b-9c3f-ee72b78bbd2a"
+

@@ -81,10 +81,10 @@ export default function AuthGate({ onSuccess }: Props) {
             Project Aegis
           </CardTitle>
           <CardDescription className="text-xs text-slate-400 mt-1 font-medium">
-            Sovereign AI Memory Layer
+            Sovereign AI Memory Vault
           </CardDescription>
         </CardHeader>
-
+ 
         <CardContent className="px-8 pb-4 md:px-10 flex flex-col gap-6">
           {/* Feature tags */}
           <div className="flex flex-wrap gap-1.5 justify-center">
@@ -94,7 +94,7 @@ export default function AuthGate({ onSuccess }: Props) {
               </Badge>
             ))}
           </div>
-
+ 
           {/* Agent status */}
           {agentOnline === false && (
             <div className="bg-rose-950/20 border border-rose-900/30 rounded-lg px-4 py-2.5 text-xs text-rose-400 flex items-center gap-2.5 animate-fade-in font-medium">
@@ -108,10 +108,10 @@ export default function AuthGate({ onSuccess }: Props) {
               <span>Confidential TEE Agent online</span>
             </div>
           )}
-
+ 
           {/* Status prompt */}
           <p className="text-center text-xs min-h-[16px] text-slate-400 font-medium">
-            {busy ? 'Opening NEAR wallet selector...' : 'Connect your NEAR wallet to access your private vault'}
+            {busy ? 'Opening NEAR wallet selector...' : 'Connect your NEAR wallet to access your private memory vault'}
           </p>
 
           {/* Connect button */}

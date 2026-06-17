@@ -5,7 +5,7 @@ import type { VaultPointer } from './types';
 //
 // Calls NEAR contract view methods directly via the public NEAR JSON-RPC.
 // No wallet connection required — these are unauthenticated read-only calls.
-// Spec: ARCH.md §4.2 — view methods do not mutate state.
+// Spec: simplified_arch.md — view methods do not mutate state.
 //
 // Response decoding: NEAR RPC returns result.result as an array of ASCII byte
 // values. We decode: Uint8Array → UTF-8 string → JSON.parse.

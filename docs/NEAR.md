@@ -231,7 +231,7 @@ When users interact via MCP tools (Cursor, Claude Code), the Hono gateway submit
 > A previous version of this document incorrectly stated that the client sends its function call access key private key to the gateway during `/auth/unlock`. **This is WRONG and MUST NOT be implemented.**  
 > Sending any private key to the gateway would expose it to Cloudflare infrastructure, KV storage, and log systems. The correct model is described below.
 
-**Correct Model — Gateway-generated key pair (see also DEPLOYMENT.md §4.3):**
+**Correct Model — Gateway-generated key pair (see also simplified_arch.md):**
 
 1. At deployment, the **gateway generates its own Ed25519 key pair** (`GATEWAY_FUNCKEY_PRIVKEY` / `GATEWAY_FUNCKEY_PUBKEY`).
 2. The `GATEWAY_FUNCKEY_PRIVKEY` is injected into the Cloudflare Worker as a **sealed secret** — it never leaves the gateway's runtime.
@@ -242,7 +242,7 @@ When users interact via MCP tools (Cursor, Claude Code), the Hono gateway submit
 **What this means:**
 - The client sends NO private key to the gateway at any time.
 - `predecessor_account_id()` in the contract is the USER's account ID (NEAR transparently attributes function call key signatures to the delegating account).
-- The gateway's private key is shared across all delegated users — this is an acceptable trade-off documented in the security model (DEPLOYMENT.md §4.3). Compromise of `GATEWAY_FUNCKEY_PRIVKEY` allows mutations on all delegated users' vault indices, so it MUST be treated as a critical secret with rotation procedures.
+- The gateway's private key is shared across all delegated users — this is an acceptable trade-off documented in the security model (simplified_arch.md). Compromise of `GATEWAY_FUNCKEY_PRIVKEY` allows mutations on all delegated users' vault indices, so it MUST be treated as a critical secret with rotation procedures.
 - TTL: The function call access key persists until the user explicitly revokes it (not tied to session TTL).
 
 ### 7.5 Key Revocation

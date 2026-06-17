@@ -114,7 +114,7 @@ async function agentPost<T>(path: string, body: unknown, signal?: AbortSignal): 
 /**
  * Encrypts plaintext inside the TEE and uploads the ciphertext blob to Walrus.
  * Returns the blobId and SHA-256 integrity hash for NEAR contract registration.
- * Spec: ARCH.md §4.1 — POST /vault/write
+ * Spec: simplified_arch.md — POST /vault/write
  */
 export async function vaultWrite(
   nearAccountId: string,
@@ -136,7 +136,7 @@ export async function vaultWrite(
 /**
  * Downloads the encrypted blob from Walrus, verifies SHA-256 integrity,
  * and decrypts inside the TEE. Returns the raw plaintext to the browser.
- * Spec: ARCH.md §4.2 — POST /vault/read
+ * Spec: simplified_arch.md — POST /vault/read
  */
 export async function vaultRead(
   nearAccountId: string,
@@ -164,7 +164,7 @@ export async function vaultRead(
  * CRITICAL-R6: llmApiKey parameter removed — the key now lives in the agent's
  * AppState (loaded at startup from LLM_API_KEY env var). It is never accepted
  * in HTTP request bodies.
- * Spec: ARCH.md §7.3 — POST /skills/execute
+ * Spec: simplified_arch.md — POST /skills/execute
  */
 export async function skillsExecute(
   nearAccountId: string,

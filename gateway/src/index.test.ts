@@ -19,6 +19,54 @@ class MemoryKV {
   }
 }
 
+class MockD1Database {
+  users: Array<{ near_account_id: string; api_key: string; tee_endpoint: string }> = [];
+  firewall_logs: Array<{
+    near_account_id: string;
+    timestamp: number;
+    skill_name: string;
+    destination: string;
+    rule_triggered: string;
+    marker_detected: string | null;
+  }> = [];
+
+  prepare(query: string) {
+    const self = this;
+    return {
+      bind(...args: any[]) {
+        return {
+          async first() {
+            const param = args[0];
+            if (query.includes("WHERE api_key = ?")) {
+              const user = self.users.find(u => u.api_key === param);
+              return user ? { near_account_id: user.near_account_id } : null;
+            }
+            if (query.includes("WHERE near_account_id = ?")) {
+              const user = self.users.find(u => u.near_account_id === param);
+              return user ? { tee_endpoint: user.tee_endpoint } : null;
+            }
+            return null;
+          },
+          async run() {
+            if (query.includes("INSERT INTO firewall_audit_logs")) {
+              self.firewall_logs.push({
+                near_account_id: args[0],
+                timestamp: args[1],
+                skill_name: args[2],
+                destination: args[3],
+                rule_triggered: args[4],
+                marker_detected: args[5] ?? null
+              });
+              return { success: true };
+            }
+            return { success: true };
+          }
+        };
+      }
+    };
+  }
+}
+
 describe("Worker Gateway Bridge - Security & Routing Tests", () => {
   let originalFetch = globalThis.fetch;
 
@@ -82,6 +130,35 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
             blobId: "CertfedBdBHashBase58Ab",
             contentSha256: "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939"
           })));
+        }
+        if (url.includes("/health")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            success: true,
+            status: "healthy"
+          })));
+        }
+        if (url.includes("/attest")) {
+          return Promise.resolve(new Response(JSON.stringify({
+            success: true,
+            error_code: "",
+            attestation_status: "TEE_NOT_DETECTED",
+            tee_platform: "Unknown",
+            message: "Simulated TDX Quote",
+            tdx_quote: "SGVsbG8gRnJvbSBBYWdpcyBURUU="
+          })));
+        }
+        if (url.includes("/skills/execute")) {
+          // If the prompt contains "leak_marker", mock a firewall block response
+          if (init?.body && JSON.parse(init.body as string).prompt?.includes("leak_marker")) {
+            return Promise.resolve(new Response(
+              JSON.stringify({
+                errorCode: "FIREWALL_ERROR_SENSITIVE_CONTENT",
+                message: "Egress blocked: prompt contained sensitive word: PRIVATE_KEY"
+              }),
+              { status: 403 }
+            ));
+          }
+          return Promise.resolve(new Response(JSON.stringify({ success: true, response: "AI result" })));
         }
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       }
@@ -445,5 +522,215 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { result: any };
     expect(body.result).toBeDefined();
+  });
+
+  it("should authenticate a request using a long-lived API key from the D1 database", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+    
+    // Provision a user with an API key
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_alice_123456",
+      tee_endpoint: "http://localhost:8080"
+    });
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer ak_alice_123456",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test-api-key",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
+      }
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: any };
+    expect(body.result.tools).toBeDefined();
+  });
+
+  it("should dynamically route MCP calls to the user's specific TEE endpoint from the D1 database", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+    
+    // Provision a user with a custom TEE agent endpoint URL
+    const customUserTeeEndpoint = "http://alice-tee.near.ai";
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_alice_123456",
+      tee_endpoint: customUserTeeEndpoint
+    });
+
+    // We'll stub fetch to intercept requests to http://alice-tee.near.ai/vault/write
+    let routedUrl = "";
+    const mockRoutedFetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as any).url || "";
+      if (url.includes("alice-tee.near.ai")) {
+        routedUrl = url;
+        return Promise.resolve(new Response(JSON.stringify({
+          blobId: "CertfedBdBHashBase58Ab",
+          contentSha256: "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939"
+        })));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ success: true })));
+    };
+    vi.stubGlobal("fetch", mockRoutedFetch);
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer ak_alice_123456",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "vault_write",
+            arguments: {
+              nearAccountId: "alice.near",
+              plaintext: "secret data"
+            }
+          }
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test-api-key",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
+      }
+    );
+
+    expect(res.status).toBe(200);
+    expect(routedUrl).toContain("http://alice-tee.near.ai/vault/write");
+  });
+
+  it("should query and return TEE attestation details during agent_health check", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_alice_123456",
+      tee_endpoint: "http://localhost:8080"
+    });
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer ak_alice_123456",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "agent_health",
+            arguments: {}
+          }
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test-api-key",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
+      }
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: { content: Array<{ text: string }> } };
+    expect(body.result.content[0].text).toBeDefined();
+    
+    const healthResult = JSON.parse(body.result.content[0].text);
+    expect(healthResult.healthy).toBe(true);
+    expect(healthResult.attestation).toBeDefined();
+    expect(healthResult.attestation.success).toBe(true);
+    expect(healthResult.attestation.status).toBe("TEE_NOT_DETECTED");
+    expect(healthResult.attestation.quote).toBe("SGVsbG8gRnJvbSBBYWdpcyBURUU=");
+  });
+
+  it("should write a log to D1 when a skill execution is blocked by the ZDR firewall", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_alice_123456",
+      tee_endpoint: "http://localhost:8080"
+    });
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer ak_alice_123456",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "zdr_check",
+            arguments: {
+              nearAccountId: "alice.near",
+              skillName: "chat_helper",
+              prompt: "here is my leak_marker",
+              destination: "https://api.openai.com/v1/chat/completions"
+            }
+          }
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test-api-key",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
+      }
+    );
+
+    // Should return 200/OK containing the structured firewallBlock error, or return isError in the tool call response
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: { content: Array<{ text: string }>, isError?: boolean } };
+    const toolResult = JSON.parse(body.result.content[0].text);
+    expect(toolResult.success).toBe(false);
+    expect(toolResult.firewallBlock).toBe(true);
+
+    // Verify D1 has recorded the block
+    expect(DB.firewall_logs.length).toBe(1);
+    expect(DB.firewall_logs[0].near_account_id).toBe("alice.near");
+    expect(DB.firewall_logs[0].skill_name).toBe("chat_helper");
+    expect(DB.firewall_logs[0].rule_triggered).toBe("SENSITIVE_CONTENT_BLOCKED");
+    expect(DB.firewall_logs[0].marker_detected).toBe("PRIVATE_KEY");
   });
 });

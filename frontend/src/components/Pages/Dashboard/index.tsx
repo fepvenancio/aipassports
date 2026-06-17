@@ -145,7 +145,7 @@ function SettingsPanel({ session, agentOnline }: { session: AuthSession; agentOn
       
       <Section title="DOCUMENTATION REFERENCES">
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2 p-4">
-          {['ARCH.md','IDENTITY.md','NEAR.md','WALRUS.md','SYNC.md','FIREWALL.md','DEPLOYMENT.md'].map((doc) => (
+          {['simplified_arch.md','IDENTITY.md','NEAR.md','WALRUS.md','SYNC.md','FIREWALL.md'].map((doc) => (
             <a key={doc} href={`https://github.com/fepvenancio/aipassports/blob/main/docs/${doc}`}
               target="_blank" rel="noopener noreferrer"
               className="flex items-center gap-1.5 text-xs text-cyan-400 hover:text-cyan-300 font-mono px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg hover:border-slate-700 transition-all"

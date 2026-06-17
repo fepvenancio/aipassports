@@ -154,7 +154,7 @@ To add more test cases:
 
 ## Related Documentation
 
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) - Production deployment guide
+- [docs/simplified_arch.md](docs/simplified_arch.md) - Simplified multi-tenant SaaS architecture
 - [backend/README.md](backend/README.md) - Backend contract details
 - [agent/README.md](agent/README.md) - Agent implementation details
 - [gateway/README.md](gateway/README.md) - Gateway setup and configuration

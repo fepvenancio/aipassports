@@ -1,6 +1,6 @@
 # Project Aegis: The Sovereign AI Passport
 
-[![Security: IronClaw TEE](https://img.shields.io/badge/Security-IronClaw_TEE-blueviolet)](docs/ARCH.md)
+[![Security: IronClaw TEE](https://img.shields.io/badge/Security-IronClaw_TEE-blueviolet)](docs/simplified_arch.md)
 [![Storage: Walrus Protocol](https://img.shields.io/badge/Storage-Walrus_Protocol-blue)](docs/WALRUS.md)
 [![Identity: NEAR Protocol](https://img.shields.io/badge/Identity-NEAR_Protocol-green)](docs/NEAR.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray.svg)](LICENSE)
@@ -254,11 +254,10 @@ aipassport/
 ├── frontend/       # Vite React dashboard
 ├── infra/          # Deployment manifests
 └── docs/
-    ├── ARCH.md         # System architecture & topology
+    ├── simplified_arch.md # Simplified multi-tenant SaaS architecture
     ├── IDENTITY.md     # NEAR signature auth & session management
     ├── SYNC.md         # Per-entry Walrus write/read path
     ├── FIREWALL.md     # ZDR enforcement & audit logging
-    ├── DEPLOYMENT.md   # All four layers deployment guide
     ├── NEAR.md         # Smart contract spec & NEAR CLI reference
     └── WALRUS.md       # Blob storage spec & REST API
 ```
@@ -267,11 +266,10 @@ aipassport/
 
 ## Documentation
 
-- [**Architecture**](docs/ARCH.md) — Four-layer topology, key management, MCP tool contract.
+- [**Architecture**](docs/simplified_arch.md) — Simplified multi-tenant SaaS architecture.
 - [**Identity**](docs/IDENTITY.md) — NEAR signature auth, FastAuth, session management.
 - [**Storage & Sync**](docs/SYNC.md) — Per-entry write/read path, blob format, key derivation.
 - [**ZDR Firewall**](docs/FIREWALL.md) — Egress enforcement, payload scanning, audit logging.
-- [**Deployment**](docs/DEPLOYMENT.md) — NEAR, Cloudflare Workers, IronClaw, Walrus setup.
 - [**NEAR Contract**](docs/NEAR.md) — On-chain data model, storage staking, CLI reference.
 - [**Walrus Storage**](docs/WALRUS.md) — Blob architecture, encryption format, epoch lifecycle.
 

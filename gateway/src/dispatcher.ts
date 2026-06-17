@@ -79,10 +79,36 @@ export async function handleAgentHealth(env: Env): Promise<McpToolCallResult> {
     const json = await response.json() as { success?: boolean; status?: string };
 
     if (response.ok && json.success === true) {
+      let attestation: any = { status: "UNKNOWN", error: "Not checked" };
+      try {
+        const attestResponse = await fetch(`${env.IRONCLAW_AGENT_BASE_URL}/attest`);
+        const attestJson = await attestResponse.json() as any;
+        attestation = {
+          success: attestJson.success || false,
+          status: attestJson.attestation_status || "UNKNOWN",
+          platform: attestJson.tee_platform || "Unknown",
+          message: attestJson.message || "",
+          quote: attestJson.tdx_quote || null,
+          errorCode: attestJson.error_code || null,
+          statusCode: attestResponse.status
+        };
+      } catch (attestError) {
+        attestation = {
+          success: false,
+          status: "UNREACHABLE",
+          error: String(attestError)
+        };
+      }
+
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ healthy: true, status: json.status ?? "healthy", agentUrl: env.IRONCLAW_AGENT_BASE_URL }),
+          text: JSON.stringify({
+            healthy: true,
+            status: json.status ?? "healthy",
+            agentUrl: env.IRONCLAW_AGENT_BASE_URL,
+            attestation
+          }),
         }],
       };
     }
@@ -228,6 +254,35 @@ export async function handleZdrCheck(
     const isFirewallBlock =
       msg.includes("FIREWALL_ERROR_DESTINATION_BLOCKED") ||
       msg.includes("FIREWALL_ERROR_SENSITIVE_CONTENT");
+
+    if (isFirewallBlock && env.DB) {
+      try {
+        let ruleTriggered = "UNKNOWN";
+        let markerDetected: string | null = null;
+        if (msg.includes("FIREWALL_ERROR_DESTINATION_BLOCKED")) {
+          ruleTriggered = "DESTINATION_BLOCKED";
+        } else if (msg.includes("FIREWALL_ERROR_SENSITIVE_CONTENT")) {
+          ruleTriggered = "SENSITIVE_CONTENT_BLOCKED";
+          const match = msg.match(/sensitive word: ([A-Z_]+)/i) || msg.match(/contained marker (\w+)/);
+          if (match) {
+            markerDetected = match[1] ?? null;
+          }
+        }
+
+        await env.DB.prepare(
+          "INSERT INTO firewall_audit_logs (near_account_id, timestamp, skill_name, destination, rule_triggered, marker_detected) VALUES (?, ?, ?, ?, ?, ?)"
+        ).bind(
+          nearAccountId,
+          Date.now(),
+          skillName,
+          destination,
+          ruleTriggered,
+          markerDetected
+        ).run();
+      } catch (dbErr) {
+        // Silent failure for logging to ensure we don't break the client response
+      }
+    }
 
     return {
       content: [{

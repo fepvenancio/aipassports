@@ -341,18 +341,38 @@ app.post("/mcp", async (c) => {
       return c.json(rpcError(id, -32001, "SESSION_MISSING"), 401);
     }
 
+    let authenticatedAccountId = "";
+
+    // 1. Try SESSIONS_KV session lookup
     const sessionStr = await c.env.SESSIONS_KV.get(`session:${sessionId}`);
-    if (!sessionStr) {
+    if (sessionStr) {
+      const session = JSON.parse(sessionStr) as { nearAccountId: string; expiresAt: number };
+      if (Date.now() <= session.expiresAt) {
+        authenticatedAccountId = session.nearAccountId;
+      } else {
+        await c.env.SESSIONS_KV.delete(`session:${sessionId}`);
+      }
+    }
+
+    // 2. Try D1 API key database lookup if session is not active
+    if (!authenticatedAccountId && c.env.DB) {
+      try {
+        const userRow = await c.env.DB.prepare(
+          "SELECT near_account_id FROM users WHERE api_key = ?"
+        ).bind(sessionId).first<{ near_account_id: string }>();
+        if (userRow && userRow.near_account_id) {
+          authenticatedAccountId = userRow.near_account_id;
+        }
+      } catch (dbErr) {
+        console.warn("D1 database lookup for API key failed, falling back:", dbErr);
+      }
+    }
+
+    if (!authenticatedAccountId) {
       return c.json(rpcError(id, -32002, "SESSION_EXPIRED"), 401);
     }
 
-    const session = JSON.parse(sessionStr) as { nearAccountId: string; expiresAt: number };
-    if (Date.now() > session.expiresAt) {
-      await c.env.SESSIONS_KV.delete(`session:${sessionId}`);
-      return c.json(rpcError(id, -32002, "SESSION_EXPIRED"), 401);
-    }
-
-    c.set("nearAccountId", session.nearAccountId);
+    c.set("nearAccountId", authenticatedAccountId);
   }
 
   // ─── tools/list ───────────────────────────────────────────────────────────
@@ -431,18 +451,38 @@ app.post("/mcp", async (c) => {
     try {
       let toolResult;
 
+      // Dynamic multi-tenant routing based on authenticated account TEE endpoint
+      let agentBaseUrl = env.IRONCLAW_AGENT_BASE_URL;
+      if (env.DB) {
+        try {
+          const userRow = await env.DB.prepare(
+            "SELECT tee_endpoint FROM users WHERE near_account_id = ?"
+          ).bind(authenticatedAccountId).first<{ tee_endpoint: string }>();
+          if (userRow && userRow.tee_endpoint) {
+            agentBaseUrl = userRow.tee_endpoint;
+          }
+        } catch (dbErr) {
+          // Fallback to default configured agent base URL if D1 query fails or DB is not bound (e.g. testing)
+        }
+      }
+
+      const routedEnv = {
+        ...env,
+        IRONCLAW_AGENT_BASE_URL: agentBaseUrl,
+      };
+
       switch (toolParams.name) {
         case "agent_health":
-          toolResult = await handleAgentHealth(env);
+          toolResult = await handleAgentHealth(routedEnv);
           break;
         case "vault_write":
-          toolResult = await handleVaultWrite(env, toolArgs);
+          toolResult = await handleVaultWrite(routedEnv, toolArgs);
           break;
         case "vault_read":
-          toolResult = await handleVaultRead(env, toolArgs);
+          toolResult = await handleVaultRead(routedEnv, toolArgs);
           break;
         case "zdr_check":
-          toolResult = await handleZdrCheck(env, toolArgs);
+          toolResult = await handleZdrCheck(routedEnv, toolArgs);
           break;
         case "team_vault_write":
           // Verify write permission for team vault operations
@@ -452,7 +492,7 @@ app.post("/mcp", async (c) => {
               403
             );
           }
-          toolResult = await handleTeamVaultWrite(env, toolArgs);
+          toolResult = await handleTeamVaultWrite(routedEnv, toolArgs);
           break;
         case "team_vault_read":
           // Verify membership for team vault read operations
@@ -462,7 +502,7 @@ app.post("/mcp", async (c) => {
               403
             );
           }
-          toolResult = await handleTeamVaultRead(env, toolArgs);
+          toolResult = await handleTeamVaultRead(routedEnv, toolArgs);
           break;
         case "team_manage":
           // Verify admin permission for team management
@@ -472,7 +512,7 @@ app.post("/mcp", async (c) => {
               403
             );
           }
-          toolResult = await handleTeamManage(env, toolArgs);
+          toolResult = await handleTeamManage(routedEnv, toolArgs);
           break;
         default:
           return c.json(
