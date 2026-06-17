@@ -6,6 +6,8 @@ import SkillsPanel from './SkillsPanel';
 import SkillConsole from './SkillConsole';
 import LogsPanel from './LogsPanel';
 import BillingPanel from './BillingPanel';
+import TeamsPanel from './TeamsPanel';
+import McpSetupPanel from './McpSetupPanel';
 import { pingAgent, getAgentBase, setCustomAgentUrl, getUserProfile, registerUser } from '../../../api/gateway';
 import type { AuthSession } from '../../../api/types';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '../../UI/Card';
@@ -156,8 +158,10 @@ export default function Dashboard({ session, onLock }: Props) {
         <div className="flex-1 p-6 overflow-hidden flex flex-col bg-slate-950">
           {tab === 'wiki'     && <WikiPanel     nearAccountId={session.nearAccountId} />}
           {tab === 'skills'   && <SkillsPanel   nearAccountId={session.nearAccountId} />}
+          {tab === 'teams'    && <TeamsPanel    session={session} />}
           {tab === 'console'  && <SkillConsole  nearAccountId={session.nearAccountId} />}
           {tab === 'logs'     && <LogsPanel />}
+          {tab === 'mcp'      && <McpSetupPanel session={session} />}
           {tab === 'billing'  && <BillingPanel />}
           {tab === 'settings' && (
             <SettingsPanel

@@ -155,7 +155,7 @@ export async function handleVaultWrite(
         plaintext,
         epochs: typeof epochs === "number" ? epochs : 26,
       },
-    }) as { blobId: string; contentSha256: string };
+    }) as { blobId: string; contentSha256: string; blobSizeBytes?: number };
 
     return {
       content: [{
@@ -164,6 +164,7 @@ export async function handleVaultWrite(
           success: true,
           blobId: result.blobId,
           contentSha256: result.contentSha256,
+          blobSizeBytes: result.blobSizeBytes ?? 0,
           note: "Save blobId and contentSha256 together — both are required to read back this vault entry.",
         }),
       }],

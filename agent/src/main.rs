@@ -242,6 +242,8 @@ struct WriteResponse {
     success: bool,
     blob_id: String,
     content_sha256: String,
+    /// Encrypted blob size in bytes — used by gateway for storage quota tracking.
+    blob_size_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -523,6 +525,7 @@ async fn vault_write_handler(
             success: true,
             blob_id: result.blob_id,
             content_sha256: result.content_sha256,
+            blob_size_bytes: result.blob_size_bytes,
         }),
     ).into_response())
 }
@@ -765,7 +768,8 @@ async fn team_vault_write_handler(
         Json(json!({
             "success": true,
             "blob_id": result.blob_id,
-            "content_sha256": result.content_sha256
+            "content_sha256": result.content_sha256,
+            "blob_size_bytes": result.blob_size_bytes
         })),
     ).into_response())
 }

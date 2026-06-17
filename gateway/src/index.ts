@@ -475,9 +475,38 @@ app.post("/mcp", async (c) => {
         case "agent_health":
           toolResult = await handleAgentHealth(routedEnv);
           break;
-        case "vault_write":
+        case "vault_write": {
+          // SAAS: Check storage quota before allowing the write
+          if (env.DB) {
+            try {
+              const quotaRow = await env.DB.prepare(
+                "SELECT storage_used_bytes, storage_limit_bytes FROM users WHERE near_account_id = ?"
+              ).bind(authenticatedAccountId).first<{ storage_used_bytes: number; storage_limit_bytes: number }>();
+              if (quotaRow && quotaRow.storage_used_bytes >= quotaRow.storage_limit_bytes) {
+                return c.json(
+                  rpcError(id, -32006, `QUOTA_EXCEEDED: Storage limit reached (${quotaRow.storage_used_bytes}/${quotaRow.storage_limit_bytes} bytes). Upgrade your plan to continue writing.`),
+                  403
+                );
+              }
+            } catch { /* proceed if DB check fails — fail-open for availability */ }
+          }
           toolResult = await handleVaultWrite(routedEnv, toolArgs);
+          // SAAS: Increment storage usage after successful write
+          if (env.DB && toolResult && !toolResult.isError) {
+            try {
+              const resultText = toolResult.content?.[0]?.text;
+              if (resultText) {
+                const parsed = JSON.parse(resultText) as { blobSizeBytes?: number };
+                if (typeof parsed.blobSizeBytes === "number" && parsed.blobSizeBytes > 0) {
+                  await env.DB.prepare(
+                    "UPDATE users SET storage_used_bytes = storage_used_bytes + ? WHERE near_account_id = ?"
+                  ).bind(parsed.blobSizeBytes, authenticatedAccountId).run();
+                }
+              }
+            } catch { /* metering is best-effort — don't break the write */ }
+          }
           break;
+        }
         case "vault_read":
           toolResult = await handleVaultRead(routedEnv, toolArgs);
           break;
@@ -493,6 +522,20 @@ app.post("/mcp", async (c) => {
             );
           }
           toolResult = await handleTeamVaultWrite(routedEnv, toolArgs);
+          // SAAS: Increment storage usage for team writes (billed to requesting user)
+          if (env.DB && toolResult && !toolResult.isError) {
+            try {
+              const resultText = toolResult.content?.[0]?.text;
+              if (resultText) {
+                const parsed = JSON.parse(resultText) as { blobSizeBytes?: number };
+                if (typeof parsed.blobSizeBytes === "number" && parsed.blobSizeBytes > 0) {
+                  await env.DB.prepare(
+                    "UPDATE users SET storage_used_bytes = storage_used_bytes + ? WHERE near_account_id = ?"
+                  ).bind(parsed.blobSizeBytes, authenticatedAccountId).run();
+                }
+              }
+            } catch { /* metering is best-effort */ }
+          }
           break;
         case "team_vault_read":
           // Verify membership for team vault read operations
@@ -980,7 +1023,9 @@ app.post("/api/register", async (c) => {
     }
 
     const apiKey = "ak_aegis_" + arrayBufferToBase64Url(crypto.getRandomValues(new Uint8Array(24)).buffer);
-    const teeEndpoint = body.teeEndpoint || `https://${accountId}.aegis-tee.near.ai`;
+    // SAAS: Default to the shared TEE pool (IRONCLAW_AGENT_BASE_URL) instead of
+    // a per-user subdomain that doesn't exist. Enterprise users can override later.
+    const teeEndpoint = body.teeEndpoint || c.env.IRONCLAW_AGENT_BASE_URL || "https://api.aipassports.xyz";
 
     await c.env.DB.prepare(
       "INSERT INTO users (near_account_id, api_key, tee_endpoint, subscription_status, storage_used_bytes, storage_limit_bytes, created_at) VALUES (?, ?, ?, 'free', 0, 10485760, ?)"

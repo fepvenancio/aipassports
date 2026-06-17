@@ -341,3 +341,119 @@ export async function getFirewallLogs(signal?: AbortSignal): Promise<Array<{
   const data = await res.json() as { logs: any[] };
   return data.logs;
 }
+
+// ─── Team Management ─────────────────────────────────────────────────────────
+
+/**
+ * Helper for session-authenticated POST requests to the SaaS control plane.
+ * Mirrors the pattern used by registerUser, subscribeTier, etc.
+ */
+async function gatewayPost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<T>;
+}
+
+/**
+ * Creates a new team on the SaaS control plane.
+ * The gateway generates a UUID for the team and registers it on the NEAR contract.
+ */
+export async function createTeam(
+  name: string,
+  signal?: AbortSignal,
+): Promise<{ teamId: string }> {
+  const teamId = crypto.randomUUID();
+  await gatewayPost<{ success: boolean }>('/api/team/create', { teamId, name }, signal);
+  return { teamId };
+}
+
+/**
+ * Adds a NEAR account as a member to an existing team with the given permission level.
+ * The gateway verifies team ownership via the NEAR contract before adding.
+ */
+export async function addTeamMember(
+  teamId: string,
+  memberAccountId: string,
+  permission: 'read' | 'write' | 'admin',
+  signal?: AbortSignal,
+): Promise<{ success: boolean }> {
+  return gatewayPost<{ success: boolean }>(
+    '/api/team/add_member',
+    { teamId, memberAccountId, permission },
+    signal,
+  );
+}
+
+/**
+ * Removes a member from a team. Requires admin permission on the team.
+ */
+export async function removeTeamMember(
+  teamId: string,
+  memberAccountId: string,
+  signal?: AbortSignal,
+): Promise<{ success: boolean }> {
+  return gatewayPost<{ success: boolean }>(
+    '/api/team/remove_member',
+    { teamId, memberAccountId },
+    signal,
+  );
+}
+
+/**
+ * Updates the permission level for an existing team member.
+ * Requires admin permission on the team.
+ */
+export async function updateTeamPermission(
+  teamId: string,
+  memberAccountId: string,
+  permission: 'read' | 'write' | 'admin',
+  signal?: AbortSignal,
+): Promise<{ success: boolean }> {
+  return gatewayPost<{ success: boolean }>(
+    '/api/team/update_permission',
+    { teamId, memberAccountId, permission },
+    signal,
+  );
+}
+
+/**
+ * Lists all members of a team with their permission levels and join timestamps.
+ */
+export async function listTeamMembers(
+  teamId: string,
+  signal?: AbortSignal,
+): Promise<Array<{ accountId: string; permission: string; joinedAt: number }>> {
+  const base = getAgentBase();
+  const sessionToken = localStorage.getItem('AEGIS_SESSION_TOKEN') || '';
+  const res = await fetch(`${base}/api/team/members?teamId=${encodeURIComponent(teamId)}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    signal,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `API error: HTTP ${res.status}`);
+  }
+
+  const data = await res.json() as { members: Array<{ accountId: string; permission: string; joinedAt: number }> };
+  return data.members;
+}

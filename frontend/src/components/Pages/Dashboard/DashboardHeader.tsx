@@ -8,6 +8,8 @@ const TAB_LABEL: Record<DashTab, string> = {
   logs:     'Firewall Compliance Logs',
   billing:  'Billing & Subscription',
   settings: 'Settings',
+  teams:    'Team Management',
+  mcp:      'MCP Setup',
 };
 
 interface Props {

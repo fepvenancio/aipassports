@@ -99,6 +99,13 @@ class MockD1Database {
               }
               return { success: true };
             }
+            if (query.includes("storage_used_bytes = storage_used_bytes + ?")) {
+              const user = self.users.find(u => u.near_account_id === args[1]);
+              if (user) {
+                user.storage_used_bytes = (user.storage_used_bytes || 0) + args[0];
+              }
+              return { success: true };
+            }
             return { success: true };
           }
         };
@@ -200,7 +207,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
           }
           return Promise.resolve(new Response(JSON.stringify({ success: true, response: "AI result" })));
         }
-        return Promise.resolve(new Response(JSON.stringify({ success: true })));
+        return Promise.resolve(new Response(JSON.stringify({ success: true, blobId: "TestBlobId123", contentSha256: "abcdef1234567890", blobSizeBytes: 1024 })));
       }
 
       return Promise.resolve(new Response(JSON.stringify({ success: true })));
@@ -904,5 +911,137 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     const keyBody = await resKey.json() as any;
     expect(keyBody.apiKey).toContain("ak_aegis_");
     expect(keyBody.apiKey).not.toBe("ak_old_key");
+  });
+
+  it("should block vault_write when storage quota is exceeded", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    // Create a user with exhausted storage (10MB used of 10MB limit)
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_test",
+      tee_endpoint: "http://localhost:8080",
+      subscription_status: "free",
+      storage_used_bytes: 10485760, // 10MB — exactly at limit
+      storage_limit_bytes: 10485760,
+    });
+
+    // Create session
+    const sessionId = "quota-test-session";
+    await SESSIONS_KV.put(
+      `session:${sessionId}`,
+      JSON.stringify({
+        nearAccountId: "alice.near",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3600000,
+      })
+    );
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionId}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "quota-1",
+          method: "tools/call",
+          params: {
+            name: "vault_write",
+            arguments: {
+              nearAccountId: "alice.near",
+              entryType: "wiki",
+              identifier: "test",
+              plaintext: "hello",
+            },
+          },
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080",
+      }
+    );
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.error.message).toContain("QUOTA_EXCEEDED");
+  });
+
+  it("should allow vault_write and increment storage when under quota", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+
+    // Create a user with room to write (5MB used of 10MB limit)
+    DB.users.push({
+      near_account_id: "alice.near",
+      api_key: "ak_test",
+      tee_endpoint: "http://localhost:8080",
+      subscription_status: "free",
+      storage_used_bytes: 5242880, // 5MB
+      storage_limit_bytes: 10485760, // 10MB
+    });
+
+    // Create session
+    const sessionId = "meter-test-session";
+    await SESSIONS_KV.put(
+      `session:${sessionId}`,
+      JSON.stringify({
+        nearAccountId: "alice.near",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3600000,
+      })
+    );
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionId}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "meter-1",
+          method: "tools/call",
+          params: {
+            name: "vault_write",
+            arguments: {
+              nearAccountId: "alice.near",
+              entryType: "wiki",
+              identifier: "test",
+              plaintext: "hello world",
+            },
+          },
+        }),
+      },
+      {
+        CHALLENGES_KV,
+        SESSIONS_KV,
+        DB,
+        IRONCLAW_AGENT_API_KEY: "test",
+        IRONCLAW_AGENT_BASE_URL: "http://localhost:8080",
+      }
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.result).toBeDefined();
+
+    // Verify storage usage was incremented
+    const user = DB.users.find(u => u.near_account_id === "alice.near");
+    expect(user).toBeDefined();
+    // The mock agent returns blobSizeBytes: 1024
+    expect(user!.storage_used_bytes).toBe(5242880 + 1024);
   });
 });

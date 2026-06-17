@@ -87,6 +87,9 @@ struct WalrusUploadResponse {
 pub struct WriteResult {
     pub blob_id: String,
     pub content_sha256: String,
+    /// Size of the encrypted blob uploaded to Walrus (bytes).
+    /// Used by the gateway for per-user storage quota tracking.
+    pub blob_size_bytes: usize,
 }
 
 // ─── Input Validation ─────────────────────────────────────────────────────────
@@ -165,6 +168,8 @@ pub async fn encrypt_and_publish(
     packed_payload.extend_from_slice(tag);
     packed_payload.extend_from_slice(ciphertext);
 
+    // Track blob size for quota metering before uploading
+    let blob_size_bytes = packed_payload.len();
     // 5. Compute SHA-256 hash of the original plaintext for NEAR contract integrity verification
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
@@ -217,6 +222,7 @@ pub async fn encrypt_and_publish(
     Ok(WriteResult {
         blob_id,
         content_sha256,
+        blob_size_bytes,
     })
 }
 
@@ -327,6 +333,8 @@ pub async fn write_team_vault_entry(
     packed_payload.extend_from_slice(tag);
     packed_payload.extend_from_slice(ciphertext);
 
+    // Track blob size for quota metering before uploading
+    let blob_size_bytes = packed_payload.len();
     // 5. Compute SHA-256 hash of the original content for integrity verification
     let mut hasher = Sha256::new();
     hasher.update(content);
@@ -379,5 +387,6 @@ pub async fn write_team_vault_entry(
     Ok(WriteResult {
         blob_id,
         content_sha256,
+        blob_size_bytes,
     })
 }

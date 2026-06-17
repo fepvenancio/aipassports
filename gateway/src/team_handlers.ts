@@ -40,7 +40,7 @@ export async function handleTeamVaultWrite(
         content,
         metadata: typeof metadata === "object" ? metadata : undefined,
       },
-    }) as { blobId: string; contentSha256: string };
+    }) as { blobId: string; contentSha256: string; blobSizeBytes?: number };
 
     return {
       content: [{
@@ -49,6 +49,7 @@ export async function handleTeamVaultWrite(
           success: true,
           blobId: result.blobId,
           contentSha256: result.contentSha256,
+          blobSizeBytes: result.blobSizeBytes ?? 0,
         }),
       }],
     };
