@@ -77,27 +77,39 @@ pub fn validate_identifier(id: &str) {
     }
 }
 
-/// @notice Validates that a Walrus blob_id conforms to base58 format.
-/// @dev P3-7 FIX: Previous version accepted any printable ASCII (space, /, ?, etc.),
-///      which could be used for path traversal or URL injection in the agent.
-///      Walrus blob IDs are base58-encoded SHA-256 hashes: [1-9A-HJ-NP-Za-km-z], 43-64 chars.
-///      Rule: 1-64 chars, base58 alphabet only (no 0, O, I, l).
-///      Panics with "VAULT_ERROR_INVALID_BLOB_ID" on failure.
+/// @notice Validates that a Walrus blob_id conforms to URL-safe Base64 format.
+/// @dev P3-7 CORRECTION: Walrus blob IDs are NOT Base58 — they are 256-bit hashes encoded
+///      as URL-safe Base64 (RFC 4648 §5) WITHOUT padding, producing a 43-character string.
+///
+/// ```text
+/// Correct Walrus blob ID format:
+///   - Alphabet: [A-Za-z0-9_-] (URL-safe Base64: '-' and '_' instead of '+' and '/')
+///   - Typical length: exactly 43 characters (32 bytes * 4/3 rounded up, no '=' padding)
+///   - We allow 1-64 chars to be forward-compatible with any future hash size changes
+///
+/// Examples of valid real Walrus blob IDs:
+///   oehkoh0352bRGNPjuwcy0nye3OLKT649K62imdNAlXg (43 chars)
+///   M4hsZGQ1oCktdzegB6HnI6Mi28S2nqOPHxK-W7_4BUk (43 chars, contains - and _)
+///
+/// The previous Base58 alphabet was INCORRECT - it rejected:
+///   - '0' (valid in Base64, invalid in Base58)
+///   - '-' and '_' (URL-safe Base64 substitutes for '+' and '/')
+///   - 'O', 'I', 'l' (valid in Base64, excluded in Base58 for visual ambiguity)
+/// ```
+///
+/// Panics with "VAULT_ERROR_INVALID_BLOB_ID" on failure.
 pub fn validate_blob_id(blob_id: &str) {
     let len = blob_id.len();
-    // Walrus blob IDs are base58-encoded — typically 43-44 chars for a 256-bit hash.
-    // We allow up to 64 chars for flexibility with future hash sizes.
+    // Walrus blob IDs are 43 chars for a 256-bit hash; allow up to 64 for future flexibility.
     if len == 0 || len > 64 {
         env::panic_str("VAULT_ERROR_INVALID_BLOB_ID");
     }
-    
-    // Base58 alphabet: excludes 0 (zero), O (capital o), I (capital i), l (lowercase L)
-    // to avoid visual ambiguity. These chars appearing in a blob_id are definitely invalid.
+
+    // URL-safe Base64 alphabet (RFC 4648 §5): A-Z, a-z, 0-9, hyphen (-), underscore (_).
+    // Note: NO padding character ('=') — Walrus omits padding.
     for c in blob_id.chars() {
         if !matches!(c,
-            '1'..='9' |
-            'A'..='H' | 'J'..='N' | 'P'..='Z' |
-            'a'..='k' | 'm'..='z'
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_'
         ) {
             env::panic_str("VAULT_ERROR_INVALID_BLOB_ID");
         }

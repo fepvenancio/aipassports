@@ -48,6 +48,7 @@ export interface McpSchemaProperty {
   readonly type: string;
   readonly description: string;
   readonly default?: unknown;
+  readonly enum?: readonly unknown[];
 }
 
 export interface McpTool {
@@ -60,10 +61,36 @@ export interface McpToolsListResult {
   readonly tools: readonly McpTool[];
 }
 
-export interface McpToolCallParams {
-  readonly name: string;
-  readonly arguments: Record<string, unknown>;
-}
+// Extended McpToolCallParams with all tool types including team tools
+export type McpToolCallParams =
+  | {
+      readonly name: "agent_health";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "vault_write";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "vault_read";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "zdr_check";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "team_vault_write";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "team_vault_read";
+      readonly arguments: Record<string, unknown>;
+    }
+  | {
+      readonly name: "team_manage";
+      readonly arguments: Record<string, unknown>;
+    };
 
 export interface McpTextContent {
   readonly type: "text";
@@ -73,6 +100,27 @@ export interface McpTextContent {
 export interface McpToolCallResult {
   readonly content: readonly McpTextContent[];
   readonly isError?: boolean;
+}
+
+// ─── Team Types ───────────────────────────────────────────────────────────────
+
+/** Team metadata stored on-chain */
+export interface TeamMetadata {
+  readonly teamId: string;
+  readonly name: string;
+  readonly createdAt: number;
+  readonly createdBy: string;
+}
+
+/** Permission level for team members */
+export type Permission = "read" | "write" | "admin";
+
+/** Team member record with permissions and metadata */
+export interface TeamMember {
+  readonly accountId: string;
+  readonly permission: Permission;
+  readonly joinedAt: number;
+  readonly addedBy: string;
 }
 
 // ─── Worker Env ───────────────────────────────────────────────────────────────
@@ -90,4 +138,8 @@ export interface Env {
   readonly GATEWAY_FUNCKEY_PUBKEY?: string;
   /** Optional NEAR RPC URL override */
   readonly NEAR_RPC_URL?: string;
+  /** Optional Cloudflare KV for storing team memberships */
+  readonly TEAMS_KV?: KVNamespace;
+  /** NEAR contract ID for Aegis smart contract */
+  readonly AEGIS_CONTRACT_ID?: string;
 }

@@ -27,6 +27,10 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::key_derivation;
+use crate::team_key_manager::TeamKeyManager;
+
+/// Type alias for NEAR AccountId (using String for simplicity in agent context)
+type AccountId = String;
 
 /// Custom errors for the vault reader
 #[derive(Debug, thiserror::Error)]
@@ -222,4 +226,128 @@ mod tests {
         assert!(validate_walrus_url("file:///etc/passwd").is_err(), "file:// must be blocked");
         assert!(validate_walrus_url("ftp://attacker.com").is_err(), "ftp:// must be blocked");
     }
+}
+
+// ///////////////////////////////////////////////////////////////
+//                          TEAM VAULT READER
+// ///////////////////////////////////////////////////////////////
+
+/// @notice Reads a team vault entry from Walrus and decrypts it.
+/// @dev This function handles the full team vault read pipeline:
+///      1. Fetches VaultPointer from NEAR contract (simulated - actual contract call would go here)
+///      2. Downloads encrypted blob from Walrus
+///      3. Retrieves encrypted team DEK for the requesting member
+///      4. Decrypts the team DEK using the member's DEK
+///      5. Decrypts the blob using the team DEK
+///      6. Verifies SHA-256 integrity
+/// @param master_secret Platform master secret for member DEK derivation.
+/// @param team_id The team that owns the vault entry.
+/// @param slug Unique identifier for the wiki page.
+/// @param requesting_account_id NEAR account ID of the requesting member.
+/// @param team_key_manager Team key manager for accessing encrypted team DEKs.
+/// @param blob_id Walrus blob ID (in production, this would come from contract).
+/// @param expected_sha256 Expected SHA-256 hash (in production, this would come from contract).
+/// @return Decrypted plaintext as UTF-8 string.
+pub async fn read_team_vault_entry(
+    master_secret: &[u8; 32],
+    team_id: &str,
+    slug: &str,
+    requesting_account_id: &AccountId,
+    team_key_manager: &TeamKeyManager,
+    blob_id: &str,
+    expected_sha256: &str,
+) -> Result<String, ReaderError> {
+    // HIGH-R8: Validate hash format before any processing
+    validate_sha256_format(expected_sha256)?;
+
+    // 1. Build and validate Walrus Aggregator URL
+    let aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
+        .unwrap_or_else(|_| "http://localhost:31601".to_string());
+
+    // HIGH-R6: Validate scheme (https:// required in production; http://localhost allowed for dev)
+    validate_walrus_url(&aggregator_url)?;
+
+    // CRITICAL-R3: Hardened client with timeouts and no redirects
+    let client = build_reader_client()?;
+    let url = format!("{}/v1/blobs/{}", aggregator_url, blob_id);
+
+    let response = client.get(&url).send().await?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(ReaderError::BlobNotFound(blob_id.to_string()));
+    } else if !response.status().is_success() {
+        return Err(ReaderError::AggregatorError(response.status()));
+    }
+
+    let packed_payload = response.bytes().await?;
+
+    // 2. Parse Binary Envelope: [12-byte IV][16-byte tag][ciphertext]
+    if packed_payload.len() < 12 + 16 {
+        return Err(ReaderError::EnvelopeTooSmall);
+    }
+
+    let iv = &packed_payload[..12];
+    let tag = &packed_payload[12..28];
+    let ciphertext = &packed_payload[28..];
+
+    // 3. Get encrypted team DEK for the requesting member
+    let encrypted_team_dek = team_key_manager
+        .get_encrypted_team_dek(team_id, requesting_account_id)
+        .ok_or(ReaderError::DecryptionFailed)?;
+
+    // 4. Derive member's DEK using existing key derivation
+    let member_dek = Zeroizing::new(
+        key_derivation::derive_dek(
+            master_secret,
+            requesting_account_id,
+            "wiki", // entry_type - could be parameterized
+            slug,
+        )?,
+    );
+
+    // 5. Decrypt team DEK using member's DEK
+    let team_dek_bytes = team_key_manager
+        .decrypt_team_dek_for_member(encrypted_team_dek, &member_dek)
+        .ok_or(ReaderError::DecryptionFailed)?;
+
+    if team_dek_bytes.len() != 32 {
+        return Err(ReaderError::DecryptionFailed);
+    }
+
+    let team_dek_array: [u8; 32] = team_dek_bytes.try_into()
+        .map_err(|_| ReaderError::DecryptionFailed)?;
+    let team_dek = Zeroizing::new(team_dek_array);
+
+    // 6. Decrypt blob using team DEK
+    let nonce = Nonce::from_slice(iv);
+    let mut decrypt_payload = Vec::with_capacity(ciphertext.len() + 16);
+    decrypt_payload.extend_from_slice(ciphertext);
+    decrypt_payload.extend_from_slice(tag);
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*team_dek));
+    let decrypted_bytes = cipher
+        .decrypt(nonce, decrypt_payload.as_slice())
+        .map_err(|_| ReaderError::DecryptionFailed)?;
+
+    let plaintext = String::from_utf8(decrypted_bytes)
+        .map_err(|_| ReaderError::DecryptionFailed)?;
+
+    // 7. HIGH-R8: Constant-time SHA-256 integrity check
+    let mut hasher = Sha256::new();
+    hasher.update(plaintext.as_bytes());
+    let computed_sha256 = hex::encode(hasher.finalize());
+
+    // Both strings are 64-char hex — guaranteed same length — safe for constant-time compare
+    let hashes_match: bool = computed_sha256.as_bytes()
+        .ct_eq(expected_sha256.as_bytes())
+        .into();
+
+    if !hashes_match {
+        return Err(ReaderError::IntegrityMismatch {
+            expected: expected_sha256.to_string(),
+            computed: computed_sha256,
+        });
+    }
+
+    Ok(plaintext)
 }

@@ -26,10 +26,10 @@
  * cleanly to the Worker's request/response model.
  */
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { verify } from "@noble/ed25519";
-import type { Env, JsonRpcRequest, JsonRpcResponse, McpToolCallParams } from "./types.js";
+import type { Env, JsonRpcRequest, JsonRpcResponse, McpToolCallParams, Permission } from "./types.js";
 import { TOOLS } from "./tools.js";
 import {
   handleAgentHealth,
@@ -37,6 +37,11 @@ import {
   handleVaultRead,
   handleZdrCheck,
 } from "./dispatcher.js";
+import {
+  handleTeamVaultWrite,
+  handleTeamVaultRead,
+  handleTeamManage,
+} from "./team_handlers.js";
 
 /* //////////////////////////////////////////////////////////////
                     CRYPTO & ENCODING HELPERS
@@ -157,7 +162,7 @@ const RPC_INTERNAL_ERROR = -32603;
                        HONO APPLICATION
 //////////////////////////////////////////////////////////////*/
 
-const app = new Hono<{ Bindings: Env; Variables: { nearAccountId?: string } }>();
+const app = new Hono<{ Bindings: Env; Variables: { nearAccountId?: string; teamId?: string; teamPermission?: Permission } }>();
 
 // CORS — allows any MCP client to reach the bridge.
 // Tighten this to specific origins for enterprise deployments.
@@ -184,6 +189,129 @@ app.post("/mcp", async (c) => {
   }
 
   const { id, method, params } = req;
+
+  // ─── Team Verification Helpers ────────────────────────────────────────────
+
+  /**
+   * @notice Verifies if the authenticated user is a member of the specified team.
+   * @param c Context with nearAccountId set in variables
+   * @param teamId The team ID to check membership for
+   * @returns Promise<boolean> True if user is a member, false otherwise
+   */
+  async function verify_team_membership(c: Context, teamId: string): Promise<boolean> {
+    // Get nearAccountId from context variables
+    const nearAccountId = c.get("nearAccountId");
+    if (!nearAccountId) {
+      return false;
+    }
+
+    // Call NEAR contract method is_team_member
+    const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
+    
+    try {
+      const rpcRes = await fetch(nearRpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "team-membership-check",
+          method: "query",
+          params: {
+            request_type: "call_function",
+            finality: "final",
+            account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
+            method_name: "is_team_member",
+            args_base64: btoa(JSON.stringify({
+              team_id: teamId,
+              account_id: nearAccountId
+            }))
+          },
+        }),
+      });
+      
+      if (!rpcRes.ok) {
+        return false;
+      }
+      
+      const json = await rpcRes.json<{ result: boolean }>();
+      return !!json.result; // Returns true if member exists
+    } catch (error) {
+      console.error("Team membership verification failed:", error);
+      return false;
+    }
+  }
+
+  /**
+   * @notice Gets the permission level of the authenticated user in the specified team.
+   * @param c Context with nearAccountId set in variables
+   * @param teamId The team ID to check permission for
+   * @returns Promise<Permission | null> Permission if member, null otherwise
+   */
+  async function get_team_permission(c: Context, teamId: string): Promise<Permission | null> {
+    // Get nearAccountId from context variables
+    const nearAccountId = c.get("nearAccountId");
+    if (!nearAccountId) {
+      return null;
+    }
+
+    // Call NEAR contract method get_team_member
+    const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
+    
+    try {
+      const rpcRes = await fetch(nearRpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "team-permission-check",
+          method: "query",
+          params: {
+            request_type: "call_function",
+            finality: "final",
+            account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
+            method_name: "get_team_member",
+            args_base64: btoa(JSON.stringify({
+              team_id: teamId,
+              account_id: nearAccountId
+            }))
+          },
+        }),
+      });
+      
+      if (!rpcRes.ok) {
+        return null;
+      }
+      
+      const json = await rpcRes.json<{ result: { permission: Permission } | null }>();
+      const member = json.result;
+      return member?.permission || null;
+    } catch (error) {
+      console.error("Team permission check failed:", error);
+      return null;
+    }
+  }
+
+  /**
+   * @notice Verifies if the authenticated user has write permission in the specified team.
+   * @param c Context with nearAccountId set in variables
+   * @param teamId The team ID to check write permission for
+   * @returns Promise<boolean> True if user has write or admin permission
+   */
+  async function verify_team_write_permission(c: Context, teamId: string): Promise<boolean> {
+    const permission = await get_team_permission(c, teamId);
+    return permission === "write" || permission === "admin";
+  }
+
+  /**
+   * @notice Verifies if the authenticated user has admin permission in the specified team.
+   * @param c Context with nearAccountId set in variables
+   * @param teamId The team ID to check admin permission for
+   * @returns Promise<boolean> True if user has admin permission
+   */
+  async function verify_team_admin_permission(c: Context, teamId: string): Promise<boolean> {
+    const permission = await get_team_permission(c, teamId);
+    return permission === "admin";
+  }
 
   // ─── initialize ───────────────────────────────────────────────────────────
   // MCP clients send this on first connection. We return minimal capabilities
@@ -242,6 +370,7 @@ app.post("/mcp", async (c) => {
 
     const toolArgs = toolParams.arguments ?? {};
     const env = c.env;
+    const toolName = toolParams.name;
 
     // Validate env — refuse to forward calls if secrets are missing.
     if (!env.IRONCLAW_AGENT_API_KEY) {
@@ -275,6 +404,30 @@ app.post("/mcp", async (c) => {
       );
     }
 
+    // Team context verification
+    const teamId = typeof toolArgs.teamId === "string" ? toolArgs.teamId : undefined;
+    if (teamId) {
+      // Verify team membership
+      const isMember = await verify_team_membership(c, teamId);
+      if (!isMember) {
+        return c.json(
+          rpcError(
+            id,
+            -32003, // TEAM_MEMBER_REQUIRED
+            `TEAM_MEMBER_REQUIRED: Account ${authenticatedAccountId} is not a member of team ${teamId}`
+          ),
+          403
+        );
+      }
+
+      // Get and store team permission
+      const permission = await get_team_permission(c, teamId);
+      if (permission) {
+        c.set("teamId", teamId);
+        c.set("teamPermission", permission);
+      }
+    }
+
     try {
       let toolResult;
 
@@ -291,9 +444,39 @@ app.post("/mcp", async (c) => {
         case "zdr_check":
           toolResult = await handleZdrCheck(env, toolArgs);
           break;
+        case "team_vault_write":
+          // Verify write permission for team vault operations
+          if (typeof toolArgs.teamId === "string" && !await verify_team_write_permission(c, toolArgs.teamId)) {
+            return c.json(
+              rpcError(id, -32004, "TEAM_PERMISSION_DENIED: Write permission required"),
+              403
+            );
+          }
+          toolResult = await handleTeamVaultWrite(env, toolArgs);
+          break;
+        case "team_vault_read":
+          // Verify membership for team vault read operations
+          if (typeof toolArgs.teamId === "string" && !await verify_team_membership(c, toolArgs.teamId)) {
+            return c.json(
+              rpcError(id, -32003, "TEAM_MEMBER_REQUIRED: Membership required"),
+              403
+            );
+          }
+          toolResult = await handleTeamVaultRead(env, toolArgs);
+          break;
+        case "team_manage":
+          // Verify admin permission for team management
+          if (typeof toolArgs.teamId === "string" && !await verify_team_admin_permission(c, toolArgs.teamId)) {
+            return c.json(
+              rpcError(id, -32005, "TEAM_PERMISSION_DENIED: Admin permission required"),
+              403
+            );
+          }
+          toolResult = await handleTeamManage(env, toolArgs);
+          break;
         default:
           return c.json(
-            rpcError(id, RPC_METHOD_NOT_FOUND, `Unknown tool: ${toolParams.name}`),
+            rpcError(id, RPC_METHOD_NOT_FOUND, `Unknown tool: ${toolName}`),
             404,
           );
       }
@@ -450,6 +633,167 @@ app.post("/auth/logout", async (c) => {
   if (sessionId) {
     await c.env.SESSIONS_KV.delete(`session:${sessionId}`);
   }
+
+  return c.json({ ok: true });
+});
+
+/* //////////////////////////////////////////////////////////////
+                   TEAM AUTHENTICATION ENDPOINTS
+//////////////////////////////////////////////////////////////*/
+
+app.post("/auth/team/challenge", async (c) => {
+  let body: { teamId?: string };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "INVALID_JSON" }, 400);
+  }
+
+  const { teamId } = body;
+
+  if (!teamId) {
+    return c.json({ error: "MISSING_TEAM_ID" }, 400);
+  }
+
+  // Generate nonce and store in CHALLENGES_KV
+  const nonceBytes = crypto.getRandomValues(new Uint8Array(32));
+  const nonce = arrayBufferToBase64Url(nonceBytes.buffer);
+
+  // Store with team-specific key format
+  await c.env.CHALLENGES_KV.put(`team_challenge:${teamId}:${nonce}`, "unused", { expirationTtl: 60 });
+
+  return c.json({ nonce, teamId });
+});
+
+app.post("/auth/team/unlock", async (c) => {
+  let body: {
+    teamId?: string;
+    nearAccountId?: string;
+    publicKey?: string;
+    signature?: string;
+    challenge?: string;
+  };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "INVALID_JSON" }, 400);
+  }
+
+  const { teamId, nearAccountId, publicKey, signature, challenge } = body;
+
+  if (!teamId || !nearAccountId || !publicKey || !signature || !challenge) {
+    return c.json({ error: "MISSING_PARAMS" }, 400);
+  }
+
+  // 1. Verify challenge exists in KV
+  const challengeKey = `team_challenge:${teamId}:${challenge}`;
+  const challengeExists = await c.env.CHALLENGES_KV.get(challengeKey);
+  if (!challengeExists) {
+    return c.json({ error: "CHALLENGE_NOT_FOUND" }, 401);
+  }
+  await c.env.CHALLENGES_KV.delete(challengeKey);
+
+  // 2. Verify Ed25519 signature
+  try {
+    const nonceBytes = base64UrlToUint8Array(challenge);
+    const sigBytes = base64UrlToUint8Array(signature);
+    const pubKeyBytes = decodePublicKey(publicKey);
+
+    const isValid = await verify(sigBytes, nonceBytes, pubKeyBytes);
+
+    if (!isValid) {
+      return c.json({ error: "INVALID_SIGNATURE" }, 401);
+    }
+  } catch (err) {
+    return c.json({ error: "INVALID_SIGNATURE", detail: String(err) }, 401);
+  }
+
+  // 3. Verify team membership via NEAR contract
+  const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
+
+  try {
+    const rpcRes = await fetch(nearRpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "team-auth",
+        method: "query",
+        params: {
+          request_type: "call_function",
+          finality: "final",
+          account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
+          method_name: "is_team_member",
+          args_base64: btoa(JSON.stringify({
+            team_id: teamId,
+            account_id: nearAccountId
+          }))
+        },
+      }),
+    });
+
+    if (!rpcRes.ok) {
+      return c.json({ error: "NEAR_RPC_ERROR" }, 500);
+    }
+
+    const json = await rpcRes.json() as { result?: boolean };
+    if (!json.result) {
+      return c.json({ error: "TEAM_MEMBER_REQUIRED" }, 403);
+    }
+  } catch (rpcErr) {
+    return c.json({ error: "NEAR_RPC_UNREACHABLE", detail: String(rpcErr) }, 500);
+  }
+
+  // 4. Generate team session
+  const sessionId = crypto.randomUUID();
+  const expiresAt = Date.now() + 3600 * 1000; // 1 hour TTL
+
+  const sessionObj = {
+    teamId,
+    nearAccountId,
+    createdAt: Date.now(),
+    expiresAt,
+  };
+
+  await c.env.SESSIONS_KV.put(`session:${sessionId}`, JSON.stringify(sessionObj), {
+    expirationTtl: 3600,
+  });
+
+  return c.json({
+    sessionId,
+    expiresAt,
+    teamId,
+  });
+});
+
+app.post("/auth/team/logout", async (c) => {
+  let body: { teamId?: string };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "INVALID_JSON" }, 400);
+  }
+
+  const { teamId } = body;
+  const authHeader = c.req.header("Authorization");
+  const xSessionId = c.req.header("x-session-id");
+  let sessionId = "";
+
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    sessionId = authHeader.substring(7);
+  } else if (xSessionId) {
+    sessionId = xSessionId;
+  }
+
+  if (!teamId || !sessionId) {
+    return c.json({ error: "MISSING_TEAM_ID_OR_SESSION" }, 400);
+  }
+
+  // Delete session from KV
+  await c.env.SESSIONS_KV.delete(`session:${sessionId}`);
 
   return c.json({ ok: true });
 });

@@ -154,6 +154,33 @@ pub fn derive_dek(
     Ok(dek)
 }
 
+/// @notice Derives a per-team master secret from the platform master secret using HKDF-SHA256.
+/// @param master_secret The platform's 32-byte master secret.
+/// @param team_id The unique team identifier (used as HKDF info for domain separation).
+/// @return A 32-byte team master secret, deterministic for a given (master_secret, team_id) pair.
+/// @dev This replaces the previous approach of storing random team master secrets in a HashMap,
+///      which caused permanent data loss on agent restart (same failure mode as C-05 for user keys).
+///
+///      Derivation scheme:
+///        team_master_secret = HKDF-SHA256(ikm=master_secret, salt=None, info="aipassport-team-v1:{team_id}")
+///
+///      Properties:
+///        - Deterministic: same (master_secret, team_id) always produces the same team key.
+///        - Isolated: different team_ids produce cryptographically independent secrets.
+///        - Domain-separated: "aipassport-team-v1:" prefix prevents cross-usage with user DEK derivation.
+///        - Zero-storage: no in-memory HashMap or disk persistence needed.
+pub fn derive_team_master_secret(
+    master_secret: &[u8; MASTER_SECRET_LEN],
+    team_id: &str,
+) -> Result<[u8; MASTER_SECRET_LEN], KeyError> {
+    let hk = Hkdf::<Sha256>::new(None, master_secret);
+    let info = format!("aipassport-team-v1:{}", team_id);
+    let mut team_secret = [0u8; MASTER_SECRET_LEN];
+    hk.expand(info.as_bytes(), &mut team_secret)
+        .map_err(|_| KeyError::HkdfExpansionFailed)?;
+    Ok(team_secret)
+}
+
 // //////////////////////////////////////////////////////////////
 //                              TESTS
 // //////////////////////////////////////////////////////////////
@@ -183,5 +210,34 @@ mod tests {
         // Domain Separation: Different identifiers must produce distinct DEKs
         let dek_alice_page2 = derive_dek(&master_secret, "alice.near", "wiki", "about").unwrap();
         assert_ne!(dek_alice1, dek_alice_page2);
+    }
+
+    #[test]
+    fn test_team_master_secret_derivation() {
+        let master_secret = [0xAAu8; MASTER_SECRET_LEN];
+
+        // Determinism: same (master_secret, team_id) must always produce the same key
+        let team_a_1 = derive_team_master_secret(&master_secret, "team-alpha").unwrap();
+        let team_a_2 = derive_team_master_secret(&master_secret, "team-alpha").unwrap();
+        assert_eq!(team_a_1, team_a_2, "Team master secret must be deterministic");
+
+        // Isolation: different team IDs must produce different secrets
+        let team_b = derive_team_master_secret(&master_secret, "team-beta").unwrap();
+        assert_ne!(team_a_1, team_b, "Different team IDs must produce different secrets");
+
+        // Domain separation: team keys must be distinct from user DEKs under the same master
+        let user_dek = derive_dek(&master_secret, "team-alpha", "wiki", "home").unwrap();
+        assert_ne!(
+            team_a_1, user_dek,
+            "Team master secret must not collide with user DEK derivation"
+        );
+
+        // Different platform secrets must produce different team secrets
+        let other_master = [0xBBu8; MASTER_SECRET_LEN];
+        let team_a_other = derive_team_master_secret(&other_master, "team-alpha").unwrap();
+        assert_ne!(
+            team_a_1, team_a_other,
+            "Different platform master secrets must produce different team secrets"
+        );
     }
 }

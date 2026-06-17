@@ -51,7 +51,7 @@ export const TOOLS: readonly McpTool[] = [
           type: "number",
           description:
             "Storage duration in Walrus epochs (1 epoch ≈ 1 week). " +
-            "Default: 26 (≈ 6 months). Maximum: 200.",
+            "Default: 26 (≈ 6 months). Maximum: 52 (≈ 1 year).",
           default: 26,
         },
       },
@@ -121,5 +121,56 @@ export const TOOLS: readonly McpTool[] = [
       },
       required: ["nearAccountId", "skillName", "prompt", "destination"],
     },
+  },
+  {
+    name: "team_vault_write",
+    description: "Write to a team's shared vault. Requires team membership with write or admin permission.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "The team ID" },
+        slug: { type: "string", description: "The entry slug" },
+        content: { type: "string", description: "The content to store" },
+        metadata: { type: "object", description: "Optional metadata" }
+      },
+      required: ["teamId", "slug", "content"]
+    }
+  },
+  {
+    name: "team_vault_read",
+    description: "Read from a team's shared vault. Requires team membership with read permission.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "The team ID" },
+        slug: { type: "string", description: "The entry slug" }
+      },
+      required: ["teamId", "slug"]
+    }
+  },
+  {
+    name: "team_manage",
+    description: "Manage team members and permissions. Requires admin permission.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { 
+          type: "string", 
+          description: "The team ID" 
+        },
+        action: { 
+          type: "string", 
+          enum: ["add", "remove", "update_permission"], 
+          description: "The action to perform" 
+        },
+        accountId: { type: "string", description: "The account ID to add/remove/update" },
+        permission: { 
+          type: "string", 
+          enum: ["read", "write", "admin"], 
+          description: "The permission to set (for add/update_permission)" 
+        }
+      },
+      required: ["teamId", "action", "accountId"]
+    }
   },
 ] as const;

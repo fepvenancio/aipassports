@@ -26,6 +26,10 @@ use reqwest::Client;
 use zeroize::Zeroizing;
 
 use crate::key_derivation;
+use crate::team_key_manager::TeamKeyManager;
+
+/// Type alias for NEAR AccountId (using String for simplicity in agent context)
+type AccountId = String;
 
 /// Maximum storage duration allowed (52 epochs ≈ 1 year on Walrus mainnet).
 /// Prevents storage quota exhaustion via epochs=u64::MAX (P2-4 fix).
@@ -136,9 +140,9 @@ pub async fn encrypt_and_publish(
     // 1. HIGH-R7: Derive User's Data Encryption Key (DEK) — wrapped in Zeroizing
     let dek = Zeroizing::new(key_derivation::derive_dek(master_secret, near_account_id, entry_type, identifier)?);
 
-    // 2. Generate cryptographically secure random 12-byte IV
+    // 2. Generate cryptographically secure random 12-byte IV using OsRng
     let mut iv = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut iv);
+    rand::rngs::OsRng.fill_bytes(&mut iv);
     let nonce = Nonce::from_slice(&iv);
 
     // 3. Encrypt via AES-256-GCM
@@ -243,4 +247,137 @@ mod tests {
         let result2 = encrypt_and_publish(&master, "alice.near", "wiki", "home", "test", 53).await;
         assert!(matches!(result2, Err(WriterError::EpochsTooLarge(53, 52))), "53 epochs must be rejected");
     }
+}
+
+// ///////////////////////////////////////////////////////////////
+//                          TEAM VAULT WRITER
+// ///////////////////////////////////////////////////////////////
+
+/// @notice Writes a team vault entry to Walrus.
+/// @dev This function handles the full team vault write pipeline:
+///      1. Generates SHA-256 hash of content
+///      2. Gets or generates team DEK from team_key_manager
+///      3. Encrypts content with team DEK using AES-256-GCM
+///      4. Uploads encrypted blob to Walrus
+///      5. Returns blob_id and content_sha256 for contract storage
+/// @param master_secret Platform master secret (unused in team context, but kept for API consistency).
+/// @param team_id The team that owns the vault entry.
+/// @param slug Unique identifier for the wiki page.
+/// @param content Raw content bytes to encrypt and store.
+/// @param requesting_account_id NEAR account ID of the requesting member.
+/// @param team_key_manager Team key manager for accessing team DEKs.
+/// @param epochs Storage duration in Walrus epochs (default 26 ≈ 6 months).
+/// @return Result containing blob_id and content_sha256 for contract storage.
+pub async fn write_team_vault_entry(
+    master_secret: &[u8; 32],
+    team_id: &str,
+    slug: &str,
+    content: &[u8],
+    requesting_account_id: &AccountId,
+    team_key_manager: &mut TeamKeyManager,
+    epochs: u64,
+) -> Result<WriteResult, WriterError> {
+    // P2-4: Cap epochs to prevent storage quota exhaustion
+    if epochs > MAX_EPOCHS {
+        return Err(WriterError::EpochsTooLarge(epochs, MAX_EPOCHS));
+    }
+
+    // 1. Get or generate team DEK (AUDIT-I1: deterministic from platform master secret)
+    let team_dek_zeroizing = team_key_manager
+        .get_or_generate_team_dek(master_secret, team_id)
+        .map_err(|_| WriterError::EncryptionFailed)?;
+
+    if team_dek_zeroizing.len() != 32 {
+        return Err(WriterError::EncryptionFailed);
+    }
+
+    let mut team_dek_array = [0u8; 32];
+    team_dek_array.copy_from_slice(&team_dek_zeroizing);
+    let team_dek = Zeroizing::new(team_dek_array);
+
+    // 2. Generate cryptographically secure random 12-byte IV using OsRng.
+    //    AUDIT-F4 FIX: The previous code used rand::thread_rng() here, which seeds from OS
+    //    entropy at startup but caches state in userspace. In TEE environments (Intel TDX /
+    //    AMD SEV-SNP) the process may have been forked or the PRNG seeded before sufficient
+    //    kernel entropy was available, risking IV reuse across multiple team blob encryptions.
+    //    OsRng calls getrandom(2) / /dev/urandom directly on each invocation — no userspace
+    //    caching — making AES-GCM nonce reuse cryptographically impossible.
+    //    Consistent with the personal vault write path at vault_writer.rs:145.
+    let mut iv = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut iv);
+    let nonce = Nonce::from_slice(&iv);
+
+    // 3. Encrypt via AES-256-GCM
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*team_dek));
+    let encrypted_bytes = cipher
+        .encrypt(nonce, content)
+        .map_err(|_| WriterError::EncryptionFailed)?;
+
+    // Split out tag and ciphertext. Standard encrypt returns [ciphertext][16-byte tag]
+    if encrypted_bytes.len() < 16 {
+        return Err(WriterError::EncryptionFailed);
+    }
+    let tag_start = encrypted_bytes.len() - 16;
+    let ciphertext = &encrypted_bytes[..tag_start];
+    let tag = &encrypted_bytes[tag_start..];
+
+    // 4. Pack into Binary Envelope: [12-byte IV][16-byte tag][ciphertext]
+    let mut packed_payload = Vec::with_capacity(12 + 16 + ciphertext.len());
+    packed_payload.extend_from_slice(&iv);
+    packed_payload.extend_from_slice(tag);
+    packed_payload.extend_from_slice(ciphertext);
+
+    // 5. Compute SHA-256 hash of the original content for integrity verification
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let content_sha256 = hex::encode(hasher.finalize());
+
+    // 6. HIGH-R6: Build and validate Walrus Publisher URL
+    let publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
+        .unwrap_or_else(|_| "http://localhost:31600".to_string());
+
+    validate_publisher_url(&publisher_url)?;
+
+    // CRITICAL-R3: Hardened client with timeouts and no redirects
+    let client = build_writer_client()?;
+    let url = format!("{}/v1/blobs?epochs={}", publisher_url, epochs);
+
+    let response = client
+        .put(&url)
+        .header("Content-Type", "application/octet-stream")
+        .body(packed_payload)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        // N-12: Cap error body to prevent internal topology disclosure
+        let err_text = response.text().await.unwrap_or_default();
+        let err_text = if err_text.len() > 512 {
+            format!("{}...[truncated]", &err_text[..512])
+        } else {
+            err_text
+        };
+        return Err(WriterError::WalrusError(status, err_text));
+    }
+
+    // 7. Parse the Walrus Response and extract blobId
+    let body_text = response.text().await?;
+    let upload_resp: WalrusUploadResponse = serde_json::from_str(&body_text)
+        .map_err(|e| WriterError::ParseError(format!("{}: body_len={}", e, body_text.len())))?;
+
+    let blob_id = if let Some(newly) = upload_resp.newly_created {
+        newly.blob_object.blob_id
+    } else if let Some(certified) = upload_resp.already_certified {
+        certified.blob_id
+    } else {
+        return Err(WriterError::ParseError(
+            "Missing blobId field in Walrus response (neither newly_created nor already_certified)".to_string()
+        ));
+    };
+
+    Ok(WriteResult {
+        blob_id,
+        content_sha256,
+    })
 }

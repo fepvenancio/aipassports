@@ -4,6 +4,8 @@ use near_sdk::{env, near, AccountId, PanicOnDefault, Promise};
 mod vault;
 #[cfg(test)]
 mod vault_tests;
+#[cfg(test)]
+mod team_tests;
 pub mod zdr_firewall;
 
 use vault::VaultPointer;
@@ -909,7 +911,7 @@ impl AegisContract {
         }
         
         // Check if already a member
-        if self.is_team_member(&team_id, &account_id) {
+        if self.internal_is_team_member(&team_id, &account_id) {
             env::panic_str("TEAM_MEMBER_ALREADY_EXISTS");
         }
         
@@ -938,6 +940,9 @@ impl AegisContract {
         
         // Validate caller is admin
         self.validate_team_admin_permission(&team_id, &caller);
+
+        // Validate target member is in the team
+        self.validate_team_membership(&team_id, &account_id);
         
         // Cannot remove self
         if account_id == caller {
@@ -983,7 +988,7 @@ impl AegisContract {
         
         // Cannot reduce own permission
         if account_id == caller {
-            let current_permission = self.get_team_member(&team_id, &caller)
+            let current_permission = self.internal_get_team_member(&team_id, &caller)
                 .map(|m| m.permission)
                 .unwrap_or(Permission::Read);
             
@@ -1024,13 +1029,23 @@ impl AegisContract {
         self.team_pointers.get(&team_id).cloned()
     }
 
+    /// @notice Public check for team membership (used by gateway).
+    pub fn is_team_member(&self, team_id: String, account_id: AccountId) -> bool {
+        self.internal_is_team_member(&team_id, &account_id)
+    }
+
+    /// @notice Public retrieval of a team member's record (used by gateway).
+    pub fn get_team_member(&self, team_id: String, account_id: AccountId) -> Option<TeamMember> {
+        self.internal_get_team_member(&team_id, &account_id)
+    }
+
     // //////////////////////////////////////////////////////////////
     //                      TEAM ACCESS HELPERS
     // //////////////////////////////////////////////////////////////
 
     /// @notice Finds and returns a TeamMember by account_id in a team's member list.
     /// @dev Returns None if the team doesn't exist or the account is not a member.
-    fn get_team_member(&self, team_id: &str, account_id: &AccountId) -> Option<TeamMember> {
+    fn internal_get_team_member(&self, team_id: &str, account_id: &AccountId) -> Option<TeamMember> {
         self.team_members
             .get(team_id)
             .and_then(|members| {
@@ -1041,20 +1056,20 @@ impl AegisContract {
     /// @notice Checks if an account has Admin permission in a team.
     /// @dev Returns false if the team doesn't exist or account is not a member.
     fn is_team_admin(&self, team_id: &str, account_id: &AccountId) -> bool {
-        self.get_team_member(team_id, account_id)
+        self.internal_get_team_member(team_id, account_id)
             .map_or(false, |member| matches!(member.permission, Permission::Admin))
     }
 
     /// @notice Checks if an account is a member of a team (any permission level).
     /// @dev Returns false if the team doesn't exist or account is not a member.
-    fn is_team_member(&self, team_id: &str, account_id: &AccountId) -> bool {
-        self.get_team_member(team_id, account_id).is_some()
+    fn internal_is_team_member(&self, team_id: &str, account_id: &AccountId) -> bool {
+        self.internal_get_team_member(team_id, account_id).is_some()
     }
 
     /// @notice Validates that the caller is a member of the specified team.
     /// @dev Panics with 'TEAM_MEMBER_REQUIRED' if validation fails.
     fn validate_team_membership(&self, team_id: &str, caller: &AccountId) {
-        if !self.is_team_member(team_id, caller) {
+        if !self.internal_is_team_member(team_id, caller) {
             env::panic_str("TEAM_MEMBER_REQUIRED");
         }
     }
@@ -1062,7 +1077,7 @@ impl AegisContract {
     /// @notice Validates that the caller has Write or Admin permission in the team.
     /// @dev Panics with 'TEAM_PERMISSION_DENIED' if validation fails.
     fn validate_team_write_permission(&self, team_id: &str, caller: &AccountId) {
-        let member = self.get_team_member(team_id, caller);
+        let member = self.internal_get_team_member(team_id, caller);
         if !member.map_or(false, |m| matches!(m.permission, Permission::Write | Permission::Admin)) {
             env::panic_str("TEAM_PERMISSION_DENIED");
         }
@@ -1294,7 +1309,8 @@ mod tests {
             let slug = format!("slug-{:04}", i);
             contract.update_wiki_pointer(
                 slug,
-                "VadBase58BXXXXXXXXXXXXXXX".to_string(),
+                // TEST-FIX-4: Use URL-safe Base64 blob ID (Walrus format)
+                "M4hsZGQ1oCktdzegB6HnI6Mi28S2nqOPHxK-W7-4BUk".to_string(),
                 "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
             );
         }
@@ -1302,40 +1318,28 @@ mod tests {
         // This (MAX_ENTRIES_PER_USER + 1)th call must panic
         contract.update_wiki_pointer(
             "slug-overflow".to_string(),
-            "VadBase58BXXXXXXXXXXXXXXX".to_string(),
+            "M4hsZGQ1oCktdzegB6HnI6Mi28S2nqOPHxK-W7-4BUk".to_string(),
             "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
         );
     }
 
-    /// P3-7: Verify that invalid blob_id characters are rejected.
+    /// P3-7 CORRECTION: Validate that invalid blob_id characters are rejected.
+    /// Walrus uses URL-safe Base64 [A-Za-z0-9_-]. Space and '/' are invalid in that alphabet.
     #[test]
     #[should_panic(expected = "VAULT_ERROR_INVALID_BLOB_ID")]
     fn test_blob_id_invalid_chars_rejected() {
         let alice: AccountId = "alice.near".parse().unwrap();
         testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
         let mut contract = AegisContract::new();
-        // Blob ID with invalid chars: space, slash, 0 (excluded from base58)
+        // Blob ID with chars invalid in URL-safe Base64: space and slash
+        // Note: '0', 'O', 'I', 'l' are NOW VALID (URL-safe Base64 is not Base58)
         contract.update_wiki_pointer(
             "slug".to_string(),
-            "blob/id with spaces 0OIl".to_string(),
+            "blob/id with spaces".to_string(), // space and '/' are invalid
             "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
         );
     }
 
-    /// P3-7: Verify base58 alphabet exclusions (0, O, I, l) are rejected.
-    #[test]
-    #[should_panic(expected = "VAULT_ERROR_INVALID_BLOB_ID")]
-    fn test_blob_id_base58_excluded_chars_rejected() {
-        let alice: AccountId = "alice.near".parse().unwrap();
-        testing_env!(get_context(alice.clone(), 100_000_000_000_000_000_000_000));
-        let mut contract = AegisContract::new();
-        // '0' (zero) is excluded from base58 alphabet
-        contract.update_wiki_pointer(
-            "slug".to_string(),
-            "0InvalidBase58Contains0Zero".to_string(),
-            "d6e330a1c1d9333a39393a646c26a1c1d9333a39393a646c26a1c1d9333a3939".to_string(),
-        );
-    }
 
     #[test]
     fn test_zdr_firewall_compliance_audit() {

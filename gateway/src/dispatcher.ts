@@ -18,7 +18,7 @@ import type { Env, McpToolCallResult } from "./types.js";
                          SHADE AGENT CLIENT
 //////////////////////////////////////////////////////////////*/
 
-interface ShadeAgentCallOptions {
+export interface ShadeAgentCallOptions {
   readonly env: Env;
   readonly path: string;
   readonly body?: unknown;
@@ -30,8 +30,9 @@ interface ShadeAgentCallOptions {
  * @notice Forwards a request to the IronClaw Shade Agent.
  * @dev Injects `Authorization: Bearer <IRONCLAW_AGENT_API_KEY>` on every call.
  *      Returns the parsed JSON response body or throws a structured error string.
+ *      Exported so team_handlers.ts can share this implementation (AUDIT-I3).
  */
-async function callShadeAgent({ env, path, body, method = "POST" }: ShadeAgentCallOptions): Promise<unknown> {
+export async function callShadeAgent({ env, path, body, method = "POST" }: ShadeAgentCallOptions): Promise<unknown> {
   const url = `${env.IRONCLAW_AGENT_BASE_URL}${path}`;
 
   const init: RequestInit = {
@@ -241,6 +242,8 @@ export async function handleZdrCheck(
     };
   }
 }
+
+
 
 /* //////////////////////////////////////////////////////////////
                          HELPERS

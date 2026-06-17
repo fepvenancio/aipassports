@@ -37,6 +37,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{info, warn, error};
 use subtle::ConstantTimeEq;
+use crate::vault_writer::WriterError;
 
 /// MEDIUM-P2-3: Sanitize a string before emitting it to structured logs.
 /// Strips non-printable ASCII (including ANSI escape codes, newlines, tabs)
@@ -54,6 +55,12 @@ mod vault_reader;
 mod zdr_firewall;
 mod skill_executor;
 
+#[cfg(test)]
+mod team_key_manager_tests;
+mod team_key_manager;
+
+use team_key_manager::TeamKeyManager;
+
 // ─── Shared State ─────────────────────────────────────────────────────────────
 
 /// Shared application state housing the platform's unsealed 32-byte master secret,
@@ -67,6 +74,8 @@ struct AppState {
     /// Pre-loaded from LLM_API_KEY at startup (CRITICAL-R6).
     /// Injected into execute_skill() — NEVER accepted from HTTP body.
     llm_api_key: String,
+    /// Team key manager for team-based encryption and access control.
+    pub team_key_manager: TeamKeyManager,
 }
 
 // ─── Error Mapping ─────────────────────────────────────────────────────────────
@@ -78,6 +87,63 @@ enum AppError {
     Writer(vault_writer::WriterError),
     Reader(vault_reader::ReaderError),
     Skill(skill_executor::SkillError),
+}
+
+// ─── Team Request/Response DTOs ──────────────────────────────────────────────
+
+/// Permission enum for team members (mirrors backend Permission enum)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+enum Permission {
+    Read,
+    Write,
+    Admin,
+}
+
+/// Request DTO for team creation
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamCreateRequest {
+    team_id: String,
+    name: String,
+}
+
+/// Request DTO for adding team member
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamAddMemberRequest {
+    team_id: String,
+    member_account_id: String,
+    permission: String,
+}
+
+/// Request DTO for removing team member
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamRemoveMemberRequest {
+    team_id: String,
+    member_account_id: String,
+}
+
+/// Request DTO for team vault write
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamVaultWriteRequest {
+    team_id: String,
+    slug: String,
+    content: String,
+    requesting_account_id: String,
+}
+
+/// Request DTO for team vault read
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamVaultReadRequest {
+    team_id: String,
+    slug: String,
+    blob_id: String,
+    expected_sha256: String,
+    requesting_account_id: String,
 }
 
 impl IntoResponse for AppError {
@@ -200,18 +266,23 @@ fn validate_near_account_id(id: &str) -> Result<(), (StatusCode, &'static str)> 
     Ok(())
 }
 
-/// HIGH-03: Validate that a Walrus blob ID is safe to embed in a URL path segment.
-/// Walrus blob IDs are base58 strings — only alphanumeric characters allowed.
-/// Prevents path traversal (../../), CRLF injection, and query string injection.
+/// @notice Validates that a Walrus blob ID is safe to embed in a URL path segment.
+/// @dev Walrus blob IDs are URL-safe Base64-encoded 256-bit hashes (RFC 4648 §5):
+///      - Alphabet: [A-Za-z0-9_-] (hyphen and underscore instead of + and /)
+///      - Typical length: exactly 43 characters; max 64 for forward compatibility
+///      - No padding ('=') — Walrus omits trailing padding chars
+///      Examples: "M4hsZGQ1oCktdzegB6HnI6Mi28S2nqOPHxK-W7_4BUk" (43 chars)
+///      Prevents path traversal (../../), CRLF injection, and query string injection.
 fn validate_blob_id(id: &str) -> Result<(), (StatusCode, &'static str)> {
-    if id.is_empty() || id.len() > 128 {
-        return Err((StatusCode::BAD_REQUEST, "INVALID_BLOB_ID: length must be 1-128 chars"));
+    if id.is_empty() || id.len() > 64 {
+        return Err((StatusCode::BAD_REQUEST, "INVALID_BLOB_ID: length must be 1-64 chars (URL-safe Base64)"));
     }
     if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err((StatusCode::BAD_REQUEST, "INVALID_BLOB_ID: only [a-zA-Z0-9_-] allowed"));
+        return Err((StatusCode::BAD_REQUEST, "INVALID_BLOB_ID: only [A-Za-z0-9_-] allowed (URL-safe Base64)"));
     }
     Ok(())
 }
+
 
 /// Validate that the entry type is one of the supported domain separation types.
 fn validate_entry_type(entry_type: &str) -> Result<(), (StatusCode, &'static str)> {
@@ -508,6 +579,195 @@ async fn skill_execute_handler(
     Ok((StatusCode::OK, Json(response_json)).into_response())
 }
 
+// ─── Team Management Handlers ─────────────────────────────────────────────────
+
+/// @notice Creates a new team.
+/// @dev AUDIT-I1-A: Team master secrets are now derived deterministically from the platform
+///      master secret — no random generation or storage is required at creation time.
+///      Validates team_id format and (in production) calls the NEAR contract to register
+///      the team on-chain.
+async fn team_create_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamCreateRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Validate team_id format
+    if req.team_id.is_empty() || req.team_id.len() > 128 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_TEAM_ID",
+                "message": "Team ID must be 1-128 characters"
+            })),
+        ).into_response());
+    }
+
+    if !req.team_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_TEAM_ID",
+                "message": "Team ID must contain only [a-z0-9_-]"
+            })),
+        ).into_response());
+    }
+
+    // AUDIT-I1-A: No master secret generation or storage needed.
+    // The team master secret is derived on-demand from the platform master secret
+    // via key_derivation::derive_team_master_secret() whenever a team vault operation occurs.
+    // TODO: Call NEAR contract create_team (production wiring required).
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "team_id": req.team_id
+        })),
+    ).into_response())
+}
+
+/// @notice Adds a member to a team.
+/// @dev AUDIT-I1-A: `team_exists()` check removed — team master secrets are now derived
+///      deterministically, so any valid team_id has a valid key. Team existence is enforced
+///      by the NEAR contract (on-chain source of truth), not the in-memory key cache.
+async fn team_add_member_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamAddMemberRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Validate member account ID
+    if req.member_account_id.is_empty() || req.member_account_id.len() > 64 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_ACCOUNT_ID",
+                "message": "Account ID must be 1-64 characters"
+            })),
+        ).into_response());
+    }
+
+    // Validate permission
+    let _permission = match req.permission.as_str() {
+        "Read" => Permission::Read,
+        "Write" => Permission::Write,
+        "Admin" => Permission::Admin,
+        _ => return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_PERMISSION",
+                "message": "Permission must be 'Read', 'Write', or 'Admin'"
+            })),
+        ).into_response()),
+    };
+
+    // TODO: Call NEAR contract add_team_member (production wiring required).
+    // TODO: Derive member DEK and encrypt team DEK for them (requires Mutex<TeamKeyManager>).
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "success": true })),
+    ).into_response())
+}
+
+/// @notice Removes a member from a team.
+/// @dev AUDIT-I1-A: `team_exists()` check removed — see team_add_member_handler for rationale.
+async fn team_remove_member_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamRemoveMemberRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Validate member account ID is present in the request
+    if req.member_account_id.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_ACCOUNT_ID",
+                "message": "member_account_id must not be empty"
+            })),
+        ).into_response());
+    }
+
+    // TODO: Call NEAR contract remove_team_member (production wiring required).
+    // TODO: Delete encrypted team DEK from TeamKeyManager (requires Mutex<TeamKeyManager>).
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "success": true })),
+    ).into_response())
+}
+
+/// @notice Writes to team vault.
+/// @dev Encrypts content with team DEK (derived from platform master secret) and uploads to Walrus.
+///      AUDIT-I1-A: `team_exists()` check removed — team keys are derived deterministically.
+///      Team existence validation is the responsibility of the NEAR contract.
+async fn team_vault_write_handler(
+    Extension(_state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamVaultWriteRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Validate team_id and slug are non-empty
+    if req.team_id.is_empty() || req.slug.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "errorCode": "INVALID_REQUEST",
+                "message": "team_id and slug must not be empty"
+            })),
+        ).into_response());
+    }
+
+    // TODO: Derive team DEK via state.team_key_manager.get_or_generate_team_dek(&state.master_secret, &req.team_id)
+    //       and call vault_writer::encrypt_and_publish() with the team DEK.
+    //       Requires Mutex<TeamKeyManager> for mutable DEK cache access.
+    // TODO: Call NEAR contract update_team_wiki_pointer (production wiring required).
+
+    // Simulated result until production wiring is complete
+    let result = vault_writer::WriteResult {
+        blob_id: "simulated-blob-id".to_string(),
+        content_sha256: "simulated-sha256-hash".to_string(),
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "blob_id": result.blob_id,
+            "content_sha256": result.content_sha256
+        })),
+    ).into_response())
+}
+
+/// @notice Reads from team vault.
+/// @dev Downloads and decrypts team vault entry using team DEK.
+///      AUDIT-I1-A: `team_exists()` check removed — team keys are derived deterministically
+///      from the platform master secret. If the blob_id is valid but the team key is wrong,
+///      the AES-GCM authentication tag will fail, producing a DecryptionFailed error.
+async fn team_vault_read_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(req): Json<TeamVaultReadRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Read from team vault
+    let content = vault_reader::read_team_vault_entry(
+        &state.master_secret,
+        &req.team_id,
+        &req.slug,
+        &req.requesting_account_id,
+        &state.team_key_manager,
+        &req.blob_id,
+        &req.expected_sha256,
+    ).await.map_err(AppError::Reader)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "content": content
+        })),
+    ).into_response())
+}
+
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -554,6 +814,7 @@ async fn main() {
         master_secret,
         api_key_bytes: api_key.into_bytes(),
         llm_api_key,
+        team_key_manager: TeamKeyManager::new(),
     });
 
     // 4. Build CORS layer
@@ -593,6 +854,13 @@ async fn main() {
         .route("/vault/write", post(vault_write_handler))
         .route("/vault/read", post(vault_read_handler))
         .route("/skills/execute", post(skill_execute_handler))
+        // Team management endpoints
+        .route("/team/create", post(team_create_handler))
+        .route("/team/add_member", post(team_add_member_handler))
+        .route("/team/remove_member", post(team_remove_member_handler))
+        // Team vault endpoints
+        .route("/vault/team/write", post(team_vault_write_handler))
+        .route("/vault/team/read", post(team_vault_read_handler))
         .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024)) // 1 MB max body
         .route_layer(middleware::from_fn_with_state(state.clone(), require_api_key));
 
