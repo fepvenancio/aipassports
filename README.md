@@ -37,6 +37,25 @@ Your vault entries are encrypted inside a hardware TEE before they ever touch th
 | **Compute & Encryption** | IronClaw Shade Agent (TEE) | Derives DEKs, encrypts/decrypts, executes LLM skills with ZDR firewall |
 | **Blob Storage** | Walrus Protocol | Per-entry AES-256-GCM encrypted blobs, erasure-coded |
 
+### Team Data Flow
+
+```
+Team Collaboration Layer
+        │
+        ▼
+NEAR Contract (Team Metadata)
+        │
+        ├──► Team Master Secret (Sealed in TEE)
+        │
+        └──► Team DEKs (Derived per-team)
+                    │
+                    ├──► Member DEKs (Per-user)
+                    │
+                    └──► Encrypted Team DEKs (Per-member)
+                                │
+                                └──► Team Vault Entries (Shared blobs)
+```
+
 ### Key Properties
 
 | Property | Implementation |
@@ -67,6 +86,141 @@ Wiki pages are also exposed as `wiki://{slug}` MCP resources.
 
 ---
 
+## Team Support
+
+Project Aegis now includes comprehensive team collaboration features, allowing multiple users to securely share vault entries and manage permissions.
+
+### Team Functionality Overview
+
+| Feature | Description |
+|---|---|
+| **Team Creation** | Create shared workspaces with unique team IDs |
+| **Member Management** | Add/remove members with granular permissions |
+| **Shared Vault** | Collaborative wiki entries accessible to team members |
+| **Permission Levels** | Read, Write, and Admin roles for fine-grained access control |
+| **Encryption Isolation** | Each team has unique encryption keys for security isolation |
+
+### Creating a Team
+
+```typescript
+// MCP Tool Call
+const teamId = "engineering-team";
+const teamName = "Engineering Department";
+
+const response = await mcp.tools.call("create_team", {
+    teamId,
+    name: teamName
+});
+
+// Returns: TeamMetadata with creation timestamp
+```
+
+### Adding Team Members
+
+```typescript
+// Add member with specific permission
+const memberAccount = "alice.near";
+const permission = "write"; // or "read", "admin"
+
+const response = await mcp.tools.call("add_team_member", {
+    teamId,
+    accountId: memberAccount,
+    permission
+});
+```
+
+### Permission Levels
+
+| Permission | Capabilities |
+|---|---|
+| **read** | View team wiki entries, list team members |
+| **write** | Create/update team wiki entries, add members with read permission |
+| **admin** | Full access including member management and team settings |
+
+### Team Vault Operations
+
+Team vault entries work like personal wiki entries but are accessible to authorized team members:
+
+```typescript
+// Write to team vault
+const result = await mcp.tools.call("team_vault_write", {
+    teamId: "engineering-team",
+    slug: "architecture-decision",
+    content: "# Architecture Decision Record...",
+    metadata: { author: "alice.near", tags: ["architecture"] }
+});
+
+// Returns: { blobId, contentSha256 }
+
+// Read from team vault
+const content = await mcp.tools.call("team_vault_read", {
+    teamId: "engineering-team",
+    slug: "architecture-decision"
+});
+
+// Returns: { content, metadata }
+```
+
+### Team Management
+
+```typescript
+// List all team members
+const members = await mcp.tools.call("list_team_members", {
+    teamId: "engineering-team"
+});
+
+// Update member permission
+const response = await mcp.tools.call("update_team_member_permission", {
+    teamId: "engineering-team",
+    accountId: "alice.near",
+    permission: "admin"
+});
+
+// Remove team member
+const response = await mcp.tools.call("remove_team_member", {
+    teamId: "engineering-team",
+    accountId: "alice.near"
+});
+```
+
+### Example: Full Team Workflow
+
+```typescript
+// 1. Create team
+const team = await mcp.tools.call("create_team", {
+    teamId: "product-team",
+    name: "Product Development"
+});
+
+// 2. Add team members
+await mcp.tools.call("add_team_member", {
+    teamId: "product-team",
+    accountId: "bob.near",
+    permission: "write"
+});
+
+await mcp.tools.call("add_team_member", {
+    teamId: "product-team",
+    accountId: "carol.near",
+    permission: "read"
+});
+
+// 3. Collaborate on shared documents
+await mcp.tools.call("team_vault_write", {
+    teamId: "product-team",
+    slug: "roadmap-q3",
+    content: "# Q3 Roadmap..."
+});
+
+// 4. Read shared documents (any team member)
+const roadmap = await mcp.tools.call("team_vault_read", {
+    teamId: "product-team",
+    slug: "roadmap-q3"
+});
+```
+
+---
+
 ## Gateway Endpoints
 
 | Endpoint | Method | Auth | Description |
@@ -86,11 +240,17 @@ Wiki pages are also exposed as `wiki://{slug}` MCP resources.
 aipassport/
 ├── backend/        # NEAR smart contract (Rust, near-sdk 5.6)
 │   └── src/
-│       ├── lib.rs          # AegisContract entry point
-│       ├── vault.rs        # VaultAggregate + VaultPointer
+│       ├── lib.rs          # AegisContract entry point + team methods
+│       ├── vault.rs        # VaultAggregate + VaultPointer + team validation
 │       └── zdr_firewall.rs # ZDR compliance (ported to agent)
 ├── gateway/        # Hono MCP gateway (TypeScript, Cloudflare Workers)
+│   └── src/
+│       ├── team_handlers.ts  # Team-specific MCP tool handlers
+│       └── index.test.ts      # Integration tests including team auth
 ├── agent/          # IronClaw Shade Agent (Rust, TEE)
+│   └── src/
+│       ├── team_key_manager.rs # Team encryption key management
+│       └── team_key_manager_tests.rs # Team key manager unit tests
 ├── frontend/       # Vite React dashboard
 ├── infra/          # Deployment manifests
 └── docs/
