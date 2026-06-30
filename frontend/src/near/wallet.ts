@@ -1,5 +1,4 @@
 import type { WalletSelector } from '@near-wallet-selector/core';
-import type { actionCreators as ActionCreatorsType } from '@near-wallet-selector/core';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEAR Wallet Service — Phase 3
@@ -28,14 +27,8 @@ const NEAR_NETWORK = (import.meta.env.VITE_NEAR_NETWORK as 'testnet' | 'mainnet'
 const CONTRACT_ID = (import.meta.env.VITE_NEAR_CONTRACT_ID as string | undefined)
   ?? 'aegis-vault.testnet';
 
-// 100 Tgas expressed as BigInt (NAJ action builder expects BigInt for gas)
-const GAS = BigInt('100000000000000');
-// 0.01 NEAR in yoctoNEAR (excess storage deposit auto-refunded by contract)
-const STORAGE_DEPOSIT = BigInt('10000000000000000000000');
-
 let _selector: WalletSelector | null = null;
 let _selectorPromise: Promise<WalletSelector> | null = null;
-let _actionCreators: typeof ActionCreatorsType | null = null;
 
 // ─── Selector (lazy-loaded) ───────────────────────────────────────────────────
 
@@ -53,7 +46,6 @@ async function getSelector(): Promise<WalletSelector> {
     ]);
 
     const { setupWalletSelector } = coreModule;
-    _actionCreators = coreModule.actionCreators;
 
     _selector = await setupWalletSelector({
       network: NEAR_NETWORK,
@@ -128,74 +120,9 @@ export async function disconnectWallet(): Promise<void> {
   } catch { /* best-effort */ }
 }
 
-// ─── Internal: sign and broadcast a FunctionCall ─────────────────────────────
-
-async function functionCall(
-  methodName: string,
-  args: Record<string, string>,
-  deposit: bigint,
-): Promise<void> {
-  const selector = await getSelector();
-  const wallet = await selector.wallet();
-
-  // actionCreators is loaded from the dynamic import of @near-wallet-selector/core.
-  // It is guaranteed to be set because functionCall() is always called after
-  // getSelector() which initialises _actionCreators.
-  const action = _actionCreators!.functionCall(
-    methodName,
-    args,
-    GAS,
-    deposit,
-  );
-
-  await wallet.signAndSendTransaction({
-    receiverId: CONTRACT_ID,
-    actions: [action],
-  });
-}
-
-// ─── Wiki Mutations ───────────────────────────────────────────────────────────
-
-/**
- * Broadcasts update_wiki_pointer to the NEAR contract.
- * 0.01 NEAR storage deposit — excess refunded (NEAR.md §4.2).
- */
-export function updateWikiPointer(
-  slug: string,
-  blobId: string,
-  contentSha256: string,
-): Promise<void> {
-  return functionCall(
-    'update_wiki_pointer',
-    { slug, blob_id: blobId, content_sha256: contentSha256 },
-    STORAGE_DEPOSIT,
-  );
-}
-
-/** Broadcasts remove_wiki_pointer. No deposit required. */
-export function removeWikiPointer(slug: string): Promise<void> {
-  return functionCall('remove_wiki_pointer', { slug }, BigInt(0));
-}
-
-// ─── Skill Mutations ──────────────────────────────────────────────────────────
-
-/** Broadcasts update_skill_pointer with storage deposit. */
-export function updateSkillPointer(
-  skillId: string,
-  blobId: string,
-  contentSha256: string,
-): Promise<void> {
-  return functionCall(
-    'update_skill_pointer',
-    { skill_id: skillId, blob_id: blobId, content_sha256: contentSha256 },
-    STORAGE_DEPOSIT,
-  );
-}
-
-/** Broadcasts remove_skill_pointer. */
-export function removeSkillPointer(skillId: string): Promise<void> {
-  return functionCall('remove_skill_pointer', { skill_id: skillId }, BigInt(0));
-}
+// Pointer mutations were removed with the NEAR contract retirement (Phase 2.5).
+// Pointers now live in D1 and are written via the gateway — see api/pointers.ts.
+// This module retains only NEAR-wallet login (NEP-413 signing) until SSO lands.
 
 /** Signs a challenge nonce using the connected wallet. */
 export async function signChallengeMessage(challenge: string): Promise<{ publicKey: string; signature: string }> {

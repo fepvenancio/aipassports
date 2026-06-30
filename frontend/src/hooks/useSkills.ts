@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import * as nearRpc from '../api/nearRpc';
+import * as pointers from '../api/pointers';
 import * as agent from '../api/gateway';
-import * as wallet from '../near/wallet';
 import type { SkillEntry, SkillConfig, VaultPointer } from '../api/types';
 import { sanitizeError } from '../utils/sanitizeError';
 
@@ -29,13 +28,13 @@ export function useSkills(nearAccountId: string) {
     setStatus('fetching');
     setErrorMessage(null);
     try {
-      const ids = await nearRpc.listSkillIds(nearAccountId);
+      const ids = await pointers.listSkillIds(nearAccountId);
 
       // Fetch all pointers in parallel
       const entries = await Promise.all(
         ids.map(async (id): Promise<SkillEntry> => {
           try {
-            const pointer = await nearRpc.getSkillPointer(nearAccountId, id);
+            const pointer = await pointers.getSkillPointer(nearAccountId, id);
             let config: SkillConfig | undefined;
 
             // Best-effort: decrypt skill config to get name/description
@@ -85,7 +84,7 @@ export function useSkills(nearAccountId: string) {
       );
 
       // Register pointer on NEAR contract via wallet transaction
-      await wallet.updateSkillPointer(id, blobId, contentSha256);
+      await pointers.updateSkillPointer(id, blobId, contentSha256);
 
       const pointer: VaultPointer = {
         blob_id: blobId,
@@ -110,7 +109,7 @@ export function useSkills(nearAccountId: string) {
     setStatus('removing');
     setErrorMessage(null);
     try {
-      await wallet.removeSkillPointer(id);
+      await pointers.removeSkillPointer(id);
       setSkills((prev) => prev.filter((s) => s.id !== id));
       setStatus('idle');
     } catch (e) {

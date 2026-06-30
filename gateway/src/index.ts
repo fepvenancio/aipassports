@@ -1017,6 +1017,103 @@ app.get("/api/team/members", async (c) => {
   }
 });
 
+// ─── Pointer index (D1-backed; replaces the NEAR contract — Phase 2.5) ──────────
+// Per-user wiki/skill pointers: which encrypted blob belongs to which
+// {account, entryType, identifier}. Owner is always the authenticated session user.
+
+function isEntryType(t: unknown): t is "wiki" | "skill" {
+  return t === "wiki" || t === "skill";
+}
+
+app.post("/api/pointers/set", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    entryType?: string; identifier?: string; blobId?: string; contentSha256?: string;
+  };
+  const { entryType, identifier, blobId, contentSha256 } = body;
+  if (!isEntryType(entryType)) return c.json({ error: "INVALID_ENTRY_TYPE" }, 400);
+  if (typeof identifier !== "string" || !identifier || identifier.length > 128) {
+    return c.json({ error: "INVALID_IDENTIFIER" }, 400);
+  }
+  if (typeof blobId !== "string" || typeof contentSha256 !== "string") {
+    return c.json({ error: "INVALID_ARGS" }, 400);
+  }
+
+  try {
+    await c.env.DB.prepare(
+      "INSERT INTO pointers (owner_type, owner_id, entry_type, identifier, blob_id, content_sha256, updated_at) " +
+      "VALUES ('user', ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(owner_type, owner_id, entry_type, identifier) DO UPDATE SET " +
+      "blob_id = excluded.blob_id, content_sha256 = excluded.content_sha256, updated_at = excluded.updated_at"
+    ).bind(accountId, entryType, identifier, blobId, contentSha256, Date.now()).run();
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/pointers/remove", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as { entryType?: string; identifier?: string };
+  if (!isEntryType(body.entryType)) return c.json({ error: "INVALID_ENTRY_TYPE" }, 400);
+  if (typeof body.identifier !== "string" || !body.identifier) {
+    return c.json({ error: "INVALID_IDENTIFIER" }, 400);
+  }
+  try {
+    await c.env.DB.prepare(
+      "DELETE FROM pointers WHERE owner_type = 'user' AND owner_id = ? AND entry_type = ? AND identifier = ?"
+    ).bind(accountId, body.entryType, body.identifier).run();
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.get("/api/pointers/list", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const entryType = c.req.query("entryType");
+  if (!isEntryType(entryType)) return c.json({ error: "INVALID_ENTRY_TYPE" }, 400);
+  try {
+    const rows = await c.env.DB.prepare(
+      "SELECT identifier FROM pointers WHERE owner_type = 'user' AND owner_id = ? AND entry_type = ? ORDER BY identifier ASC"
+    ).bind(accountId, entryType).all<{ identifier: string }>();
+    return c.json({ identifiers: (rows.results ?? []).map((r) => r.identifier) });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.get("/api/pointers/get", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const entryType = c.req.query("entryType");
+  const identifier = c.req.query("identifier") || "";
+  if (!isEntryType(entryType)) return c.json({ error: "INVALID_ENTRY_TYPE" }, 400);
+  if (!identifier) return c.json({ error: "INVALID_IDENTIFIER" }, 400);
+  try {
+    const row = await c.env.DB.prepare(
+      "SELECT blob_id, content_sha256, updated_at FROM pointers WHERE owner_type = 'user' AND owner_id = ? AND entry_type = ? AND identifier = ?"
+    ).bind(accountId, entryType, identifier).first<{ blob_id: string; content_sha256: string; updated_at: number }>();
+    if (!row) return c.json({ pointer: null });
+    return c.json({
+      pointer: { blob_id: row.blob_id, content_sha256: row.content_sha256, updated_at_ms: row.updated_at },
+    });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
 app.get("/api/user", async (c) => {
   const accountId = await getAuthenticatedUser(c);
   if (!accountId) {

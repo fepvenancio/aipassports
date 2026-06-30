@@ -43,6 +43,22 @@ class MockD1Database {
     added_by?: string;
     joined_at?: number;
   }> = [];
+  teams: Array<{ team_id: string; name: string; creator_account_id: string; created_at: number }> = [];
+  pointers: Array<{
+    owner_type: string;
+    owner_id: string;
+    entry_type: string;
+    identifier: string;
+    blob_id: string;
+    content_sha256: string;
+    updated_at: number;
+  }> = [];
+
+  async batch(stmts: Array<{ run: () => Promise<unknown> }>) {
+    const out = [];
+    for (const s of stmts) out.push(await s.run());
+    return out;
+  }
 
   prepare(query: string) {
     const self = this;
@@ -67,12 +83,39 @@ class MockD1Database {
               } : null;
             }
             // Team membership / permission lookups (NEAR contract retirement).
+            if (query.includes("COUNT(*) AS n FROM team_members")) {
+              const n = self.team_members.filter(x => x.team_id === args[0] && x.permission === "admin").length;
+              return { n };
+            }
             if (query.includes("FROM team_members")) {
               const m = self.team_members.find(x => x.team_id === args[0] && x.account_id === args[1]);
               if (!m) return null;
               return query.includes("SELECT permission") ? { permission: m.permission } : { ok: 1 };
             }
+            if (query.includes("FROM teams WHERE team_id = ?")) {
+              return self.teams.find(t => t.team_id === args[0]) ? { ok: 1 } : null;
+            }
+            if (query.includes("FROM pointers") && query.includes("SELECT blob_id")) {
+              const p = self.pointers.find(x =>
+                x.owner_type === "user" && x.owner_id === args[0] && x.entry_type === args[1] && x.identifier === args[2]);
+              return p ? { blob_id: p.blob_id, content_sha256: p.content_sha256, updated_at: p.updated_at } : null;
+            }
             return null;
+          },
+          async all() {
+            if (query.includes("identifier FROM pointers")) {
+              const results = self.pointers
+                .filter(x => x.owner_type === "user" && x.owner_id === args[0] && x.entry_type === args[1])
+                .map(x => ({ identifier: x.identifier }));
+              return { results };
+            }
+            if (query.includes("FROM team_members WHERE team_id = ?")) {
+              const results = self.team_members
+                .filter(x => x.team_id === args[0])
+                .map(x => ({ account_id: x.account_id, permission: x.permission, joined_at: x.joined_at ?? 0 }));
+              return { results };
+            }
+            return { results: [] };
           },
           async run() {
             if (query.includes("INSERT INTO firewall_audit_logs")) {
@@ -117,6 +160,45 @@ class MockD1Database {
               if (user) {
                 user.storage_used_bytes = (user.storage_used_bytes || 0) + args[0];
               }
+              return { success: true };
+            }
+            // ── Teams ──
+            if (query.includes("INSERT INTO teams")) {
+              self.teams.push({ team_id: args[0], name: args[1], creator_account_id: args[2], created_at: args[3] });
+              return { success: true };
+            }
+            // ── Team members (insert literal-admin, upsert, update, delete) ──
+            if (query.includes("INSERT INTO team_members") && query.includes("'admin'")) {
+              self.team_members.push({ team_id: args[0], account_id: args[1], permission: "admin", added_by: args[2], joined_at: args[3] });
+              return { success: true };
+            }
+            if (query.includes("INSERT INTO team_members")) {
+              const existing = self.team_members.find(x => x.team_id === args[0] && x.account_id === args[1]);
+              if (existing) existing.permission = args[2];
+              else self.team_members.push({ team_id: args[0], account_id: args[1], permission: args[2], added_by: args[3], joined_at: args[4] });
+              return { success: true };
+            }
+            if (query.includes("UPDATE team_members SET permission = ?")) {
+              const m = self.team_members.find(x => x.team_id === args[1] && x.account_id === args[2]);
+              if (m) m.permission = args[0];
+              return { success: true };
+            }
+            if (query.includes("DELETE FROM team_members")) {
+              self.team_members = self.team_members.filter(x => !(x.team_id === args[0] && x.account_id === args[1]));
+              return { success: true };
+            }
+            // ── Pointers (upsert, delete) ──
+            if (query.includes("INSERT INTO pointers")) {
+              const [owner_id, entry_type, identifier, blob_id, content_sha256, updated_at] = args;
+              const existing = self.pointers.find(x =>
+                x.owner_type === "user" && x.owner_id === owner_id && x.entry_type === entry_type && x.identifier === identifier);
+              if (existing) { existing.blob_id = blob_id; existing.content_sha256 = content_sha256; existing.updated_at = updated_at; }
+              else self.pointers.push({ owner_type: "user", owner_id, entry_type, identifier, blob_id, content_sha256, updated_at });
+              return { success: true };
+            }
+            if (query.includes("DELETE FROM pointers")) {
+              self.pointers = self.pointers.filter(x =>
+                !(x.owner_type === "user" && x.owner_id === args[0] && x.entry_type === args[1] && x.identifier === args[2]));
               return { success: true };
             }
             return { success: true };
@@ -1078,5 +1160,107 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     expect(user).toBeDefined();
     // The mock agent returns blobSizeBytes: 1024
     expect(user!.storage_used_bytes).toBe(5242880 + 1024);
+  });
+
+  // ─── NEAR retirement: team write endpoints + pointer index (D1) ───────────────
+
+  const future = () => Date.now() + 3600 * 1000;
+
+  it("creates a team and makes the creator an admin (/api/team/create)", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+    await SESSIONS_KV.put("session:s-alice", JSON.stringify({ nearAccountId: "alice.near", expiresAt: future() }));
+
+    const res = await app.request(
+      "/api/team/create",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer s-alice" },
+        body: JSON.stringify({ teamId: "acme", name: "Acme" }),
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+
+    expect(res.status).toBe(200);
+    expect(DB.teams.find(t => t.team_id === "acme")).toBeDefined();
+    const member = DB.team_members.find(m => m.team_id === "acme" && m.account_id === "alice.near");
+    expect(member?.permission).toBe("admin");
+  });
+
+  it("lets an admin add a member but forbids non-members (/api/team/add_member)", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+    DB.teams.push({ team_id: "acme", name: "Acme", creator_account_id: "alice.near", created_at: 1 });
+    DB.team_members.push({ team_id: "acme", account_id: "alice.near", permission: "admin", joined_at: 1 });
+    await SESSIONS_KV.put("session:s-alice", JSON.stringify({ nearAccountId: "alice.near", expiresAt: future() }));
+    await SESSIONS_KV.put("session:s-bob", JSON.stringify({ nearAccountId: "bob.near", expiresAt: future() }));
+
+    const ok = await app.request(
+      "/api/team/add_member",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer s-alice" },
+        body: JSON.stringify({ teamId: "acme", memberAccountId: "carol.near", permission: "write" }),
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(ok.status).toBe(200);
+    expect(DB.team_members.find(m => m.account_id === "carol.near")?.permission).toBe("write");
+
+    const denied = await app.request(
+      "/api/team/add_member",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer s-bob" },
+        body: JSON.stringify({ teamId: "acme", memberAccountId: "dave.near", permission: "read" }),
+      },
+      { CHALLENGES_KV, SESSIONS_KV, DB }
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("round-trips a pointer: set -> list -> get -> remove (/api/pointers/*)", async () => {
+    const CHALLENGES_KV = new MemoryKV();
+    const SESSIONS_KV = new MemoryKV();
+    const DB = new MockD1Database();
+    await SESSIONS_KV.put("session:s-alice", JSON.stringify({ nearAccountId: "alice.near", expiresAt: future() }));
+    const headers = { "Content-Type": "application/json", Authorization: "Bearer s-alice" };
+    const env = { CHALLENGES_KV, SESSIONS_KV, DB };
+
+    const setRes = await app.request(
+      "/api/pointers/set",
+      { method: "POST", headers, body: JSON.stringify({ entryType: "wiki", identifier: "home", blobId: "blob1", contentSha256: "sha1" }) },
+      env
+    );
+    expect(setRes.status).toBe(200);
+
+    const listRes = await app.request("/api/pointers/list?entryType=wiki", { method: "GET", headers }, env);
+    expect(((await listRes.json()) as { identifiers: string[] }).identifiers).toEqual(["home"]);
+
+    const getRes = await app.request("/api/pointers/get?entryType=wiki&identifier=home", { method: "GET", headers }, env);
+    const got = (await getRes.json()) as { pointer: { blob_id: string; content_sha256: string } | null };
+    expect(got.pointer?.blob_id).toBe("blob1");
+    expect(got.pointer?.content_sha256).toBe("sha1");
+
+    const rmRes = await app.request(
+      "/api/pointers/remove",
+      { method: "POST", headers, body: JSON.stringify({ entryType: "wiki", identifier: "home" }) },
+      env
+    );
+    expect(rmRes.status).toBe(200);
+
+    const gone = await app.request("/api/pointers/get?entryType=wiki&identifier=home", { method: "GET", headers }, env);
+    expect(((await gone.json()) as { pointer: unknown }).pointer).toBeNull();
+  });
+
+  it("rejects pointer access without a session (401)", async () => {
+    const res = await app.request(
+      "/api/pointers/list?entryType=wiki",
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+      { CHALLENGES_KV: new MemoryKV(), SESSIONS_KV: new MemoryKV(), DB: new MockD1Database() }
+    );
+    expect(res.status).toBe(401);
   });
 });

@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import * as nearRpc from '../api/nearRpc';
+import * as pointers from '../api/pointers';
 import * as agent from '../api/gateway';
-import * as wallet from '../near/wallet';
 import type { VaultPointer } from '../api/types';
 import { sanitizeError } from '../utils/sanitizeError';
 
@@ -82,7 +81,7 @@ export function useWiki(nearAccountId: string) {
   const listSlugs = useCallback(async () => {
     setStatus('fetching-slugs');
     try {
-      const slugs = await nearRpc.listWikiSlugs(nearAccountId);
+      const slugs = await pointers.listWikiSlugs(nearAccountId);
       setState((s) => ({ ...s, status: 'idle', slugs }));
     } catch (e) {
       setError(sanitizeError(e));
@@ -104,7 +103,7 @@ export function useWiki(nearAccountId: string) {
       isNewPage: false, content: '', savedContent: '', pointer: null,
     }));
     try {
-      const pointer = await nearRpc.getWikiPointer(nearAccountId, slug);
+      const pointer = await pointers.getWikiPointer(nearAccountId, slug);
       if (!pointer) throw new Error(`No pointer found for slug "${slug}"`);
 
       if (controller.signal.aborted) return;
@@ -167,7 +166,7 @@ export function useWiki(nearAccountId: string) {
 
       // 2. Commit pointer to NEAR contract
       setState((s) => ({ ...s, status: 'committing-near' }));
-      await wallet.updateWikiPointer(slug, blobId, contentSha256);
+      await pointers.updateWikiPointer(slug, blobId, contentSha256);
 
       if (controller.signal.aborted) return;
 
@@ -196,7 +195,7 @@ export function useWiki(nearAccountId: string) {
   async function deletePage(slug: string) {
     setState((s) => ({ ...s, status: 'deleting' }));
     try {
-      await wallet.removeWikiPointer(slug);
+      await pointers.removeWikiPointer(slug);
       setState((s) => ({
         ...s, status: 'idle',
         slugs: s.slugs.filter((x) => x !== slug),

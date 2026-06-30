@@ -149,8 +149,6 @@ export interface Env {
   readonly NEAR_RPC_URL?: string;
   /** Optional Cloudflare KV for storing team memberships */
   readonly TEAMS_KV?: KVNamespace;
-  /** NEAR contract ID for Aegis smart contract */
-  readonly AEGIS_CONTRACT_ID?: string;
   /** Cloudflare D1 Database for mapping multi-tenant users to endpoints */
   readonly DB: D1Database;
 }
