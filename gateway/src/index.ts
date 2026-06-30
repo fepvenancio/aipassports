@@ -199,46 +199,12 @@ app.post("/mcp", async (c) => {
    * @returns Promise<boolean> True if user is a member, false otherwise
    */
   async function verify_team_membership(c: Context, teamId: string): Promise<boolean> {
-    // Get nearAccountId from context variables
+    // Team membership now lives in D1 (NEAR contract retirement, Phase 2.5).
     const nearAccountId = c.get("nearAccountId");
-    if (!nearAccountId) {
+    if (!nearAccountId || !c.env.DB) {
       return false;
     }
-
-    // Call NEAR contract method is_team_member
-    const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
-    
-    try {
-      const rpcRes = await fetch(nearRpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "team-membership-check",
-          method: "query",
-          params: {
-            request_type: "call_function",
-            finality: "final",
-            account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
-            method_name: "is_team_member",
-            args_base64: btoa(JSON.stringify({
-              team_id: teamId,
-              account_id: nearAccountId
-            }))
-          },
-        }),
-      });
-      
-      if (!rpcRes.ok) {
-        return false;
-      }
-      
-      const json = await rpcRes.json<{ result: boolean }>();
-      return !!json.result; // Returns true if member exists
-    } catch (error) {
-      console.error("Team membership verification failed:", error);
-      return false;
-    }
+    return dbIsTeamMember(c.env.DB, teamId, nearAccountId);
   }
 
   /**
@@ -248,47 +214,12 @@ app.post("/mcp", async (c) => {
    * @returns Promise<Permission | null> Permission if member, null otherwise
    */
   async function get_team_permission(c: Context, teamId: string): Promise<Permission | null> {
-    // Get nearAccountId from context variables
+    // Team permissions now live in D1 (NEAR contract retirement, Phase 2.5).
     const nearAccountId = c.get("nearAccountId");
-    if (!nearAccountId) {
+    if (!nearAccountId || !c.env.DB) {
       return null;
     }
-
-    // Call NEAR contract method get_team_member
-    const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
-    
-    try {
-      const rpcRes = await fetch(nearRpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "team-permission-check",
-          method: "query",
-          params: {
-            request_type: "call_function",
-            finality: "final",
-            account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
-            method_name: "get_team_member",
-            args_base64: btoa(JSON.stringify({
-              team_id: teamId,
-              account_id: nearAccountId
-            }))
-          },
-        }),
-      });
-      
-      if (!rpcRes.ok) {
-        return null;
-      }
-      
-      const json = await rpcRes.json<{ result: { permission: Permission } | null }>();
-      const member = json.result;
-      return member?.permission || null;
-    } catch (error) {
-      console.error("Team permission check failed:", error);
-      return null;
-    }
+    return dbGetTeamPermission(c.env.DB, teamId, nearAccountId);
   }
 
   /**
@@ -793,40 +724,12 @@ app.post("/auth/team/unlock", async (c) => {
     return c.json({ error: "INVALID_SIGNATURE", detail: String(err) }, 401);
   }
 
-  // 3. Verify team membership via NEAR contract
-  const nearRpcUrl = c.env.NEAR_RPC_URL || "https://rpc.testnet.near.org";
-
-  try {
-    const rpcRes = await fetch(nearRpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "team-auth",
-        method: "query",
-        params: {
-          request_type: "call_function",
-          finality: "final",
-          account_id: c.env.AEGIS_CONTRACT_ID || "aegis.testnet",
-          method_name: "is_team_member",
-          args_base64: btoa(JSON.stringify({
-            team_id: teamId,
-            account_id: nearAccountId
-          }))
-        },
-      }),
-    });
-
-    if (!rpcRes.ok) {
-      return c.json({ error: "NEAR_RPC_ERROR" }, 500);
-    }
-
-    const json = await rpcRes.json() as { result?: boolean };
-    if (!json.result) {
-      return c.json({ error: "TEAM_MEMBER_REQUIRED" }, 403);
-    }
-  } catch (rpcErr) {
-    return c.json({ error: "NEAR_RPC_UNREACHABLE", detail: String(rpcErr) }, 500);
+  // 3. Verify team membership via D1 (NEAR contract retired — Phase 2.5).
+  if (!c.env.DB) {
+    return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+  }
+  if (!(await dbIsTeamMember(c.env.DB, teamId, nearAccountId))) {
+    return c.json({ error: "TEAM_MEMBER_REQUIRED" }, 403);
   }
 
   // 4. Generate team session
@@ -940,6 +843,179 @@ async function getAuthenticatedUser(c: Context<any>): Promise<string | null> {
 
   return null;
 }
+
+// ─── Team data-plane helpers (D1) ──────────────────────────────────────────────
+// Backing store for team membership/permissions after the NEAR contract retirement
+// (Phase 2.5). Shared by the /mcp authorization closures and the /api/team routes.
+// Permission values are lowercase ("read" | "write" | "admin"), matching `Permission`.
+
+async function dbIsTeamMember(db: D1Database, teamId: string, accountId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS ok FROM team_members WHERE team_id = ? AND account_id = ?")
+    .bind(teamId, accountId)
+    .first();
+  return !!row;
+}
+
+async function dbGetTeamPermission(db: D1Database, teamId: string, accountId: string): Promise<Permission | null> {
+  const row = await db
+    .prepare("SELECT permission FROM team_members WHERE team_id = ? AND account_id = ?")
+    .bind(teamId, accountId)
+    .first<{ permission: Permission }>();
+  return row?.permission ?? null;
+}
+
+// ─── Team management (D1-backed; replaces the NEAR contract — Phase 2.5) ────────
+
+app.post("/api/team/create", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as { teamId?: string; name?: string };
+  const teamId = typeof body.teamId === "string" ? body.teamId.trim() : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(teamId)) {
+    return c.json({ error: "INVALID_TEAM_ID", detail: "teamId must be 1-64 chars of [a-zA-Z0-9_-]" }, 400);
+  }
+  if (!name || name.length > 128) {
+    return c.json({ error: "INVALID_NAME", detail: "name must be 1-128 chars" }, 400);
+  }
+
+  try {
+    const existing = await c.env.DB.prepare("SELECT 1 AS ok FROM teams WHERE team_id = ?").bind(teamId).first();
+    if (existing) return c.json({ error: "TEAM_EXISTS" }, 409);
+
+    const now = Date.now();
+    // Create the team and add the creator as the first admin member, atomically.
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO teams (team_id, name, creator_account_id, created_at) VALUES (?, ?, ?, ?)")
+        .bind(teamId, name, accountId, now),
+      c.env.DB.prepare("INSERT INTO team_members (team_id, account_id, permission, added_by, joined_at) VALUES (?, ?, 'admin', ?, ?)")
+        .bind(teamId, accountId, accountId, now),
+    ]);
+    return c.json({ success: true, teamId });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/team/add_member", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as { teamId?: string; memberAccountId?: string; permission?: string };
+  const teamId = typeof body.teamId === "string" ? body.teamId : "";
+  const memberAccountId = typeof body.memberAccountId === "string" ? body.memberAccountId.trim() : "";
+  const permission = body.permission;
+  if (!teamId || !memberAccountId) return c.json({ error: "INVALID_ARGS" }, 400);
+  if (permission !== "read" && permission !== "write" && permission !== "admin") {
+    return c.json({ error: "INVALID_PERMISSION", detail: "permission must be read|write|admin" }, 400);
+  }
+  // Only a team admin may add members.
+  if ((await dbGetTeamPermission(c.env.DB, teamId, accountId)) !== "admin") {
+    return c.json({ error: "FORBIDDEN", detail: "admin permission required" }, 403);
+  }
+
+  try {
+    await c.env.DB.prepare(
+      "INSERT INTO team_members (team_id, account_id, permission, added_by, joined_at) VALUES (?, ?, ?, ?, ?) " +
+      "ON CONFLICT(team_id, account_id) DO UPDATE SET permission = excluded.permission"
+    ).bind(teamId, memberAccountId, permission, accountId, Date.now()).run();
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/team/update_permission", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as { teamId?: string; memberAccountId?: string; permission?: string };
+  const teamId = typeof body.teamId === "string" ? body.teamId : "";
+  const memberAccountId = typeof body.memberAccountId === "string" ? body.memberAccountId.trim() : "";
+  const permission = body.permission;
+  if (!teamId || !memberAccountId) return c.json({ error: "INVALID_ARGS" }, 400);
+  if (permission !== "read" && permission !== "write" && permission !== "admin") {
+    return c.json({ error: "INVALID_PERMISSION", detail: "permission must be read|write|admin" }, 400);
+  }
+  if ((await dbGetTeamPermission(c.env.DB, teamId, accountId)) !== "admin") {
+    return c.json({ error: "FORBIDDEN", detail: "admin permission required" }, 403);
+  }
+  // Member must already exist to update.
+  if ((await dbGetTeamPermission(c.env.DB, teamId, memberAccountId)) === null) {
+    return c.json({ error: "MEMBER_NOT_FOUND" }, 404);
+  }
+
+  try {
+    await c.env.DB.prepare("UPDATE team_members SET permission = ? WHERE team_id = ? AND account_id = ?")
+      .bind(permission, teamId, memberAccountId).run();
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.post("/api/team/remove_member", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const body = (await c.req.json().catch(() => ({}))) as { teamId?: string; memberAccountId?: string };
+  const teamId = typeof body.teamId === "string" ? body.teamId : "";
+  const memberAccountId = typeof body.memberAccountId === "string" ? body.memberAccountId.trim() : "";
+  if (!teamId || !memberAccountId) return c.json({ error: "INVALID_ARGS" }, 400);
+  if ((await dbGetTeamPermission(c.env.DB, teamId, accountId)) !== "admin") {
+    return c.json({ error: "FORBIDDEN", detail: "admin permission required" }, 403);
+  }
+
+  try {
+    // Don't orphan the team: refuse to remove the only remaining admin.
+    if ((await dbGetTeamPermission(c.env.DB, teamId, memberAccountId)) === "admin") {
+      const admins = await c.env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM team_members WHERE team_id = ? AND permission = 'admin'"
+      ).bind(teamId).first<{ n: number }>();
+      if ((admins?.n ?? 0) <= 1) {
+        return c.json({ error: "LAST_ADMIN", detail: "cannot remove the only admin" }, 409);
+      }
+    }
+    await c.env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND account_id = ?")
+      .bind(teamId, memberAccountId).run();
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
+
+app.get("/api/team/members", async (c) => {
+  const accountId = await getAuthenticatedUser(c);
+  if (!accountId) return c.json({ error: "UNAUTHORIZED" }, 401);
+  if (!c.env.DB) return c.json({ error: "DATABASE_NOT_CONFIGURED" }, 500);
+
+  const teamId = c.req.query("teamId") || "";
+  if (!teamId) return c.json({ error: "INVALID_ARGS", detail: "teamId required" }, 400);
+  // Only members may view the roster.
+  if (!(await dbIsTeamMember(c.env.DB, teamId, accountId))) {
+    return c.json({ error: "FORBIDDEN", detail: "membership required" }, 403);
+  }
+
+  try {
+    const rows = await c.env.DB.prepare(
+      "SELECT account_id, permission, joined_at FROM team_members WHERE team_id = ? ORDER BY joined_at ASC"
+    ).bind(teamId).all<{ account_id: string; permission: string; joined_at: number }>();
+    const members = (rows.results ?? []).map((r) => ({
+      accountId: r.account_id,
+      permission: r.permission,
+      joinedAt: r.joined_at,
+    }));
+    return c.json({ members });
+  } catch (err) {
+    return c.json({ error: "DB_ERROR", detail: String(err) }, 500);
+  }
+});
 
 app.get("/api/user", async (c) => {
   const accountId = await getAuthenticatedUser(c);

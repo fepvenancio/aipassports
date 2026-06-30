@@ -36,11 +36,12 @@ CREATE TABLE IF NOT EXISTS teams (
     created_at INTEGER NOT NULL
 );
 
--- Team members + permissions (was: contract TeamMember; permission Read/Write/Admin).
+-- Team members + permissions (was: contract TeamMember). Permission values are
+-- lowercase to match the gateway's `Permission` type ("read" | "write" | "admin").
 CREATE TABLE IF NOT EXISTS team_members (
     team_id TEXT NOT NULL,
     account_id TEXT NOT NULL,
-    permission TEXT NOT NULL CHECK (permission IN ('Read', 'Write', 'Admin')),
+    permission TEXT NOT NULL CHECK (permission IN ('read', 'write', 'admin')),
     added_by TEXT,
     joined_at INTEGER NOT NULL,
     PRIMARY KEY (team_id, account_id),

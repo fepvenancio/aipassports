@@ -36,6 +36,13 @@ class MockD1Database {
     rule_triggered: string;
     marker_detected: string | null;
   }> = [];
+  team_members: Array<{
+    team_id: string;
+    account_id: string;
+    permission: string;
+    added_by?: string;
+    joined_at?: number;
+  }> = [];
 
   prepare(query: string) {
     const self = this;
@@ -58,6 +65,12 @@ class MockD1Database {
                 storage_used_bytes: user.storage_used_bytes || 0,
                 storage_limit_bytes: user.storage_limit_bytes || 10485760
               } : null;
+            }
+            // Team membership / permission lookups (NEAR contract retirement).
+            if (query.includes("FROM team_members")) {
+              const m = self.team_members.find(x => x.team_id === args[0] && x.account_id === args[1]);
+              if (!m) return null;
+              return query.includes("SELECT permission") ? { permission: m.permission } : { ok: 1 };
             }
             return null;
           },
@@ -387,6 +400,10 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     const challenge = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     await CHALLENGES_KV.put(`team_challenge:test-team:${challenge}`, "unused");
 
+    // Membership is verified against D1 now (NEAR contract retired).
+    const DB = new MockD1Database();
+    DB.team_members.push({ team_id: "test-team", account_id: "alice.near", permission: "write" });
+
     const publicKey = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const signature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -403,7 +420,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
           challenge: challenge
         }),
       },
-      { CHALLENGES_KV, SESSIONS_KV }
+      { CHALLENGES_KV, SESSIONS_KV, DB }
     );
 
     expect(res.status).toBe(200);
@@ -435,6 +452,10 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
     };
     await SESSIONS_KV.put(`session:${teamSessionId}`, JSON.stringify(sessionObj));
 
+    // Team membership now comes from D1 (NEAR contract retired).
+    const DB = new MockD1Database();
+    DB.team_members.push({ team_id: "test-team", account_id: "alice.near", permission: "admin" });
+
     // Test team vault read with valid team session
     const res = await app.request(
       "/mcp",
@@ -460,6 +481,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       {
         CHALLENGES_KV,
         SESSIONS_KV,
+        DB,
         IRONCLAW_AGENT_API_KEY: "test-api-key",
         IRONCLAW_AGENT_BASE_URL: "http://localhost:8080",
       }
@@ -481,6 +503,10 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       expiresAt: Date.now() + 3600 * 1000,
     };
     await SESSIONS_KV.put(`session:${teamSessionId}`, JSON.stringify(sessionObj));
+
+    // Read-only membership in D1 → write must be denied.
+    const DB = new MockD1Database();
+    DB.team_members.push({ team_id: "test-team", account_id: "readonly.near", permission: "read" });
 
     // Try to write with read-only permission
     const res = await app.request(
@@ -508,6 +534,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       {
         CHALLENGES_KV,
         SESSIONS_KV,
+        DB,
         IRONCLAW_AGENT_API_KEY: "test-api-key",
         IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
       }
@@ -532,6 +559,10 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       expiresAt: Date.now() + 3600 * 1000,
     };
     await SESSIONS_KV.put(`session:${adminSessionId}`, JSON.stringify(sessionObj));
+
+    // Admin membership in D1 authorizes team_manage.
+    const DB = new MockD1Database();
+    DB.team_members.push({ team_id: "test-team", account_id: "admin.near", permission: "admin" });
 
     // Test team member addition
     const res = await app.request(
@@ -560,6 +591,7 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       {
         CHALLENGES_KV,
         SESSIONS_KV,
+        DB,
         IRONCLAW_AGENT_API_KEY: "test-api-key",
         IRONCLAW_AGENT_BASE_URL: "http://localhost:8080"
       }
