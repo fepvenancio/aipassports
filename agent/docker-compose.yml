@@ -26,6 +26,12 @@ services:
       TEE_SIMULATION: "true"
       # Required: Bearer token for the /vault/* and /skills/* routes.
       IRONCLAW_AGENT_API_KEY: "${IRONCLAW_AGENT_API_KEY:-dev-key-change-me}"
+      # Capability binding (defense-in-depth): the gateway's Ed25519 PUBLIC key (hex,
+      # 32 bytes). When set, the agent requires a gateway-signed X-Aegis-Capability
+      # token and enforces capability.sub == nearAccountId, so a leaked Bearer token
+      # alone cannot impersonate an account. Leave unset to disable (logged loudly).
+      # Pair with the gateway's AEGIS_CAP_SIGNING_KEY (the matching private seed).
+      AEGIS_GATEWAY_CAP_PUBKEY: "${AEGIS_GATEWAY_CAP_PUBKEY:-}"
       # Required for skill execution. Set in your shell or agent.dev.env.
       LLM_API_KEY: "${LLM_API_KEY}"
       # CORS: allow the Vite dev server origin

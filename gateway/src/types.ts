@@ -136,6 +136,15 @@ export interface Env {
   readonly SESSIONS_KV: KVNamespace;
   /** Optional gateway function call key public key for delegation checks */
   readonly GATEWAY_FUNCKEY_PUBKEY?: string;
+  /**
+   * Optional 32-byte Ed25519 signing seed (hex) for minting capability tokens.
+   * When set, the gateway attaches an `X-Aegis-Capability` token binding the
+   * authenticated NEAR account on each agent call, so the agent verifies the
+   * account cryptographically instead of trusting the body's `nearAccountId`.
+   * Pair with the agent's `AEGIS_GATEWAY_CAP_PUBKEY` (the matching public key).
+   * Injected as a Worker secret: `wrangler secret put AEGIS_CAP_SIGNING_KEY`.
+   */
+  readonly AEGIS_CAP_SIGNING_KEY?: string;
   /** Optional NEAR RPC URL override */
   readonly NEAR_RPC_URL?: string;
   /** Optional Cloudflare KV for storing team memberships */

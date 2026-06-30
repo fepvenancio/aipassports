@@ -13,6 +13,7 @@
  */
 
 import type { Env, McpToolCallResult } from "./types.js";
+import { mintCapabilityToken } from "./capability.js";
 
 /* //////////////////////////////////////////////////////////////
                          SHADE AGENT CLIENT
@@ -24,6 +25,14 @@ export interface ShadeAgentCallOptions {
   readonly body?: unknown;
   /** If true, sends GET with no body. Default: false (POST). */
   readonly method?: "GET" | "POST";
+  /**
+   * Authenticated NEAR account this request acts as. When set (and a gateway
+   * signing key is configured), a short-lived Ed25519 capability token binding
+   * this subject is attached as `X-Aegis-Capability`, so the agent can verify the
+   * account cryptographically instead of trusting the body's `nearAccountId`.
+   * The caller MUST have already validated `subject` against the session identity.
+   */
+  readonly subject?: string;
 }
 
 /**
@@ -32,15 +41,24 @@ export interface ShadeAgentCallOptions {
  *      Returns the parsed JSON response body or throws a structured error string.
  *      Exported so team_handlers.ts can share this implementation (AUDIT-I3).
  */
-export async function callShadeAgent({ env, path, body, method = "POST" }: ShadeAgentCallOptions): Promise<unknown> {
+export async function callShadeAgent({ env, path, body, method = "POST", subject }: ShadeAgentCallOptions): Promise<unknown> {
   const url = `${env.IRONCLAW_AGENT_BASE_URL}${path}`;
+
+  const headers: Record<string, string> = {
+    "Authorization": `Bearer ${env.IRONCLAW_AGENT_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  // Capability binding: attach a gateway-signed token asserting the authenticated
+  // subject. No-op (empty token) when no signing key is configured (legacy mode).
+  if (subject) {
+    const capabilityToken = await mintCapabilityToken(env, subject);
+    if (capabilityToken) headers["X-Aegis-Capability"] = capabilityToken;
+  }
 
   const init: RequestInit = {
     method,
-    headers: {
-      "Authorization": `Bearer ${env.IRONCLAW_AGENT_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     ...(method === "POST" && body !== undefined
       ? { body: JSON.stringify(body) }
       : {}),
@@ -148,6 +166,7 @@ export async function handleVaultWrite(
     const result = await callShadeAgent({
       env,
       path: "/vault/write",
+      subject: nearAccountId,
       body: {
         nearAccountId,
         entryType: typeof entryType === "string" ? entryType : "wiki",
@@ -195,6 +214,7 @@ export async function handleVaultRead(
     const result = await callShadeAgent({
       env,
       path: "/vault/read",
+      subject: nearAccountId,
       body: {
         nearAccountId,
         entryType: typeof entryType === "string" ? entryType : "wiki",
@@ -237,6 +257,7 @@ export async function handleZdrCheck(
     const result = await callShadeAgent({
       env,
       path: "/skills/execute",
+      subject: nearAccountId,
       body: {
         nearAccountId,
         skillName,

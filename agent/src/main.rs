@@ -55,6 +55,9 @@ mod vault_writer;
 mod vault_reader;
 mod zdr_firewall;
 mod skill_executor;
+mod capability;
+
+use capability::{CapabilityClaims, CapabilityVerifier};
 
 #[cfg(test)]
 mod team_key_manager_tests;
@@ -78,6 +81,12 @@ struct AppState {
     /// Team key manager for team-based encryption and access control.
     /// Wrapped in Mutex for safe concurrent access across async handlers.
     pub team_key_manager: Mutex<TeamKeyManager>,
+    /// Optional gateway capability-token verifier.
+    /// `Some` → capability binding ENABLED: protected requests must carry a valid
+    /// gateway-signed `X-Aegis-Capability` token whose `sub` matches the body's
+    /// `nearAccountId`. `None` → legacy bearer-only behaviour (loudly warned at
+    /// startup). Loaded from `AEGIS_GATEWAY_CAP_PUBKEY`.
+    cap_verifier: Option<CapabilityVerifier>,
 }
 
 // ─── Error Mapping ─────────────────────────────────────────────────────────────
@@ -331,7 +340,7 @@ fn validate_identifier(id: &str) -> Result<(), (StatusCode, &'static str)> {
 /// The /health endpoint is explicitly excluded from this middleware layer.
 async fn require_api_key(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     // P3-1 FIX: case-insensitive Bearer prefix matching per RFC 9110 §11.4.
@@ -377,7 +386,76 @@ async fn require_api_key(
         ).into_response();
     }
 
+    // ── Capability binding (defense-in-depth) ──────────────────────────────────
+    // The Bearer token proves the caller is the gateway; it does NOT prove which
+    // account the request may act as. When a gateway public key is configured,
+    // require a gateway-signed capability token and attach the verified claims so
+    // each handler can enforce `sub == nearAccountId`. This removes trust in the
+    // self-asserted `nearAccountId` body field: a leaked Bearer token alone can no
+    // longer impersonate an arbitrary account.
+    if let Some(verifier) = &state.cap_verifier {
+        let token = req
+            .headers()
+            .get("X-Aegis-Capability")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        match verifier.verify(&token, capability::now_ms()) {
+            Ok(claims) => {
+                // Stored for per-handler subject enforcement via Extension<CapabilityClaims>.
+                req.extensions_mut().insert(claims);
+            }
+            Err(e) => {
+                warn!(
+                    "Rejected request to {} — invalid capability token: {:?}",
+                    req.uri().path(),
+                    e
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "success": false,
+                        "errorCode": e.code(),
+                        "message": "Missing or invalid capability token (X-Aegis-Capability)."
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     next.run(req).await
+}
+
+/// Enforce that the verified capability subject matches the account the request
+/// claims to act on. A no-op when capability binding is disabled (no claims
+/// attached). Returns `Some(response)` (HTTP 403) on mismatch, `None` when allowed.
+fn enforce_capability_subject(
+    claims: &Option<Extension<CapabilityClaims>>,
+    account: &str,
+) -> Option<Response> {
+    if let Some(Extension(c)) = claims {
+        if c.sub != account {
+            warn!(
+                "Capability subject mismatch: token sub={} but request nearAccountId={}",
+                sanitize_for_log(&c.sub),
+                sanitize_for_log(account)
+            );
+            return Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "success": false,
+                        "errorCode": "AGENT_ERROR_SUBJECT_MISMATCH",
+                        "message": "Capability token subject does not match nearAccountId."
+                    })),
+                )
+                    .into_response(),
+            );
+        }
+    }
+    None
 }
 
 // ─── TEE Platform Detection ───────────────────────────────────────────────────
@@ -490,8 +568,13 @@ async fn health_handler() -> impl IntoResponse {
 /// @notice Handles the vault encryption and publishing to Walrus.
 async fn vault_write_handler(
     Extension(state): Extension<Arc<AppState>>,
+    claims: Option<Extension<CapabilityClaims>>,
     Json(req): Json<WriteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Capability binding: the verified token subject must match this account.
+    if let Some(resp) = enforce_capability_subject(&claims, &req.near_account_id) {
+        return Ok(resp);
+    }
     // Validate nearAccountId before any key derivation
     if let Err((status, msg)) = validate_near_account_id(&req.near_account_id) {
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
@@ -533,8 +616,13 @@ async fn vault_write_handler(
 /// @notice Handles the download, decryption, and hash validation of a Walrus vault entry.
 async fn vault_read_handler(
     Extension(state): Extension<Arc<AppState>>,
+    claims: Option<Extension<CapabilityClaims>>,
     Json(req): Json<ReadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Capability binding: the verified token subject must match this account.
+    if let Some(resp) = enforce_capability_subject(&claims, &req.near_account_id) {
+        return Ok(resp);
+    }
     // Validate nearAccountId and blobId before any processing
     if let Err((status, msg)) = validate_near_account_id(&req.near_account_id) {
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
@@ -579,8 +667,13 @@ async fn vault_read_handler(
 /// @notice Handles the secure execution of an AI skill configuration under ZDR egress audits.
 async fn skill_execute_handler(
     Extension(state): Extension<Arc<AppState>>,
+    claims: Option<Extension<CapabilityClaims>>,
     Json(req): Json<skill_executor::ExecuteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Capability binding: the verified token subject must match this account.
+    if let Some(resp) = enforce_capability_subject(&claims, &req.near_account_id) {
+        return Ok(resp);
+    }
     // Validate nearAccountId before any key derivation
     if let Err((status, msg)) = validate_near_account_id(&req.near_account_id) {
         return Ok((status, Json(json!({"success": false, "errorCode": msg}))).into_response());
@@ -892,11 +985,40 @@ async fn main() {
         String::new()
     });
 
+    // Capability binding: load the gateway's Ed25519 public key, if configured.
+    // A present-but-malformed key is a misconfiguration we refuse to start with —
+    // silently falling back to bearer-only would re-open the very gap this closes.
+    let cap_verifier = match CapabilityVerifier::from_env_checked() {
+        Ok(Some(v)) => {
+            info!(
+                "Capability binding ENABLED — verifying gateway-signed {} tokens and \
+                 enforcing capability.sub == nearAccountId on protected vault/skill routes.",
+                "X-Aegis-Capability"
+            );
+            Some(v)
+        }
+        Ok(None) => {
+            warn!(
+                "SECURITY: {} not set — capability binding DISABLED. The agent will trust the \
+                 self-asserted nearAccountId in request bodies; anyone holding the Bearer token \
+                 can act as any account. Set {} to the gateway's Ed25519 public key (hex) to \
+                 close this gap.",
+                capability::PUBKEY_ENV, capability::PUBKEY_ENV
+            );
+            None
+        }
+        Err(e) => {
+            error!("CRITICAL: {} is set but invalid: {}. Refusing to start.", capability::PUBKEY_ENV, e);
+            std::process::exit(1);
+        }
+    };
+
     let state = Arc::new(AppState {
         master_secret,
         api_key_bytes: api_key.into_bytes(),
         llm_api_key,
         team_key_manager: Mutex::new(TeamKeyManager::new()),
+        cap_verifier,
     });
 
     // 4. Build CORS layer
@@ -914,7 +1036,11 @@ async fn main() {
                             axum::http::Method::GET,
                             axum::http::Method::POST,
                         ])
-                        .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE])
+                        .allow_headers([
+                            axum::http::header::AUTHORIZATION,
+                            axum::http::header::CONTENT_TYPE,
+                            axum::http::HeaderName::from_static("x-aegis-capability"),
+                        ])
                 }
                 Err(_) => {
                     error!("CRITICAL: ALLOWED_ORIGIN is set but is not a valid HTTP header value: {}", origin);

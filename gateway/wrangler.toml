@@ -6,6 +6,9 @@ compatibility_flags = ["nodejs_compat"]
 # Worker secrets — set via `wrangler secret put`:
 #   wrangler secret put IRONCLAW_AGENT_API_KEY
 #   wrangler secret put IRONCLAW_AGENT_BASE_URL
+#   wrangler secret put AEGIS_CAP_SIGNING_KEY   # 32-byte Ed25519 seed (hex) for
+#       # capability tokens. The agent must run with the matching public key in
+#       # AEGIS_GATEWAY_CAP_PUBKEY. Generate a keypair: see docs/CAPABILITY_BINDING.md.
 
 [vars]
 # Non-sensitive defaults (overridden by secrets in production).

@@ -30,3 +30,10 @@ unicode-normalization = "0.1"
 url = "2"
 # N-06: Zeroize secrets from memory after use
 zeroize = { version = "1", features = ["derive"] }
+# Capability-token auth binding: verify gateway-signed Ed25519 tokens so that
+# `nearAccountId` is cryptographically asserted by the gateway, not self-declared
+# in the request body (closes the self-asserted-account-id gap behind the shared
+# Bearer token).
+ed25519-dalek = "2"
+# base64url for compact capability-token encoding (already in the tree via reqwest).
+base64 = "0.22"
