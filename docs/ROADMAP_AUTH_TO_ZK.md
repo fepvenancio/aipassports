@@ -108,6 +108,52 @@ call `enforce_capability_subject`.
 
 ---
 
+## Phase 2.5 — Retire the NEAR contract (move team + pointer data to D1)
+
+The `backend/` NEAR smart contract is the last crypto-native dependency in the data
+path and is at odds with the enterprise direction (identity/data should live in the
+customer's database, not on a public chain). Today it is still load-bearing:
+
+- **Gateway reads** team state via NEAR RPC: `is_team_member(team_id, account_id)` and
+  `get_team_member(team_id, account_id)` (`index.ts` `verify_team_membership` /
+  `get_team_permission`).
+- **Frontend writes** team + pointer state to the contract via the wallet
+  (`near/wallet.ts` `signAndSendTransaction`); reads via `api/nearRpc.ts` `viewCall`.
+- The contract stores: teams, members + permissions (Read/Write/Admin), and the
+  wiki/skill/vault **pointer index** (which blobId belongs to which account/team).
+
+**Do not delete `backend/` until the steps below are done** — removing it first breaks
+team auth. Migrate, then retire. Each step is independently shippable.
+
+- **Step 1 — D1 schema (additive, safe).** Add `teams`, `team_members`, and `pointers`
+  tables to `gateway/src/schema.sql` mirroring the contract data model. Nothing reads
+  them yet, so this cannot break anything. *(done first)*
+- **Step 2 — Gateway reads from D1.** Replace the NEAR RPC `is_team_member` /
+  `get_team_member` calls in `verify_team_membership` / `get_team_permission` with D1
+  queries against `team_members`. Keep the same function signatures so callers are
+  unchanged. *Acceptance:* membership/permission checks pass using D1, no NEAR RPC.
+- **Step 3 — Gateway write endpoints.** Add session-authenticated endpoints to create
+  teams, add/remove/update members, and register pointers in D1 — replacing the
+  frontend's wallet transactions. Enforce the actor's permission via `team_members`.
+  *Acceptance:* a user can create a team and manage members entirely through the
+  gateway under their session.
+- **Step 4 — Frontend off the wallet.** Replace `near/wallet.ts` `signAndSendTransaction`
+  and `api/nearRpc.ts` `viewCall` with the new gateway API calls. (This also removes the
+  remaining wallet bundle weight and the `INEFFECTIVE_DYNAMIC_IMPORT` warning.) Note:
+  this overlaps Phase 2's SSO work — the session identity replaces the wallet identity.
+  *Acceptance:* the app manages teams/pointers with no wallet involvement.
+- **Step 5 — Remove the contract.** Delete `backend/`, the NEAR RPC code in the gateway,
+  `near/wallet.ts` + `api/nearRpc.ts`, and the NEAR env vars (`NEAR_RPC_URL`,
+  `AEGIS_CONTRACT_ID`). Grep to confirm zero references remain. *Acceptance:* build +
+  tests green with no NEAR dependency anywhere.
+
+> Note on `account_id`: even after retiring the chain, the per-user vault key is still
+> derived from a stable account identifier (`key_derivation::derive_dek`). Keep using the
+> SSO subject (or a stable internal user id) as that identifier so existing vaults remain
+> decryptable; do not change the salt input without a re-encryption migration.
+
+---
+
 ## Phase 3 — Harden the capability layer (pre-ZK)
 
 These make the token layer production-grade and are reused by the ZK layer.
