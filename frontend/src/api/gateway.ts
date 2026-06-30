@@ -1,20 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AegisApiClient — TEE Agent HTTP Interface
+// AegisApiClient — Aegis web app API surface
 //
-// Targets the Rust TEE Shade Agent (IronClaw / local dev at localhost:8080).
+// Data plane (memory read/write, skill execution): routed through the GATEWAY MCP
+// endpoint under the user's session via ./mcpClient. The browser holds NO shared
+// agent key (Phase 1 — see docs/ROADMAP_AUTH_TO_ZK.md). The gateway authenticates
+// the session, enforces the account, and mints a capability token for the agent;
+// all encryption/decryption happens inside the TEE.
 //
-// Dev  (VITE_AGENT_URL unset): Vite proxies /api → http://localhost:8080
-// Prod (VITE_AGENT_URL set):   Direct fetch to the IronClaw agent URL
+// Control plane (/api/*, /auth/*): session-authenticated calls to the gateway.
+// `getAgentBase()` is retained for unauthenticated health checks and the existing
+// /api/* control-plane calls (which already carry the session token).
 //
-// All encryption, decryption, Walrus I/O, and LLM calls are performed
-// inside the TEE. The browser never receives or sends plaintext keys.
-//
-// Security hardening applied (audit cycle 2026-05-22 round 2):
-//   CRITICAL-R1  — Authorization: Bearer header added to all agentPost() calls.
-//   NEW-05       — VITE_AGENT_URL validated to be https:// (or http://localhost
-//                  for dev) at module initialization. Fails fast if invalid.
-//   NEW-01       — agentPost() accepts an AbortSignal for cancellation/cleanup.
+// Security history:
+//   NEW-05 — VITE_AGENT_URL validated to https:// (or http://localhost for dev).
 // ─────────────────────────────────────────────────────────────────────────────
+
+import { callMcpTool } from './mcpClient';
 
 // Read custom agent URL from localStorage if set, else fallback to Vite environment default
 export function getAgentBase(): string {
@@ -73,48 +74,24 @@ export const IS_PROD_AGENT = () => {
   return !base.startsWith('/') && !base.includes('localhost') && !base.includes('127.0.0.1');
 };
 
-// ─── Agent API Key ────────────────────────────────────────────────────────────
-
-// CRITICAL-R1: The agent now requires Bearer token authentication (C-01 server fix).
-// Without this header, every protected route returns 401 and the app is broken.
-// Key is loaded from VITE_AGENT_API_KEY — this is the public-facing API key,
-// NOT the TEE master secret (which never leaves the enclave).
-const AGENT_API_KEY = (import.meta.env.VITE_AGENT_API_KEY as string | undefined) ?? '';
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * POST to the TEE agent with:
- *  - Content-Type: application/json
- *  - Authorization: Bearer <VITE_AGENT_API_KEY>  (CRITICAL-R1)
- *  - AbortSignal for timeout/unmount cleanup     (NEW-01)
- */
-async function agentPost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const base = getAgentBase();
-  const res = await fetch(`${base}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // CRITICAL-R1: Send Bearer token on every agent request.
-      // Without this, C-01 middleware rejects all calls with 401.
-      ...(AGENT_API_KEY ? { Authorization: `Bearer ${AGENT_API_KEY}` } : {}),
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
-    throw new Error(err.error ?? `Agent error: HTTP ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
+// ─── Data plane ───────────────────────────────────────────────────────────────
+//
+// Phase 1: the browser no longer holds a shared agent key (VITE_AGENT_API_KEY is
+// removed). All memory/skill operations go through the gateway MCP endpoint under
+// the user's session via `callMcpTool` (see ./mcpClient). The gateway authenticates
+// the session, enforces the account, and mints a capability token for the agent.
+// `getAgentBase()` above is retained only for unauthenticated health checks and the
+// control-plane `/api/*` calls (which already use the session token).
 
 // ─── Vault Write ──────────────────────────────────────────────────────────────
 
 /**
- * Encrypts plaintext inside the TEE and uploads the ciphertext blob to Walrus.
+ * Encrypts plaintext inside the TEE and persists the ciphertext blob.
  * Returns the blobId and SHA-256 integrity hash for NEAR contract registration.
- * Spec: simplified_arch.md — POST /vault/write
+ *
+ * Phase 1: routed through the gateway MCP `vault_write` tool under the user's
+ * session (not directly to the agent with a shared key). The gateway enforces the
+ * account and mints a capability token the agent verifies.
  */
 export async function vaultWrite(
   nearAccountId: string,
@@ -123,7 +100,7 @@ export async function vaultWrite(
   plaintext: string,
   signal?: AbortSignal,
 ): Promise<{ blobId: string; contentSha256: string }> {
-  return agentPost<{ blobId: string; contentSha256: string }>('/vault/write', {
+  return callMcpTool<{ blobId: string; contentSha256: string }>('vault_write', {
     nearAccountId,
     entryType,
     identifier,
@@ -134,9 +111,11 @@ export async function vaultWrite(
 // ─── Vault Read ───────────────────────────────────────────────────────────────
 
 /**
- * Downloads the encrypted blob from Walrus, verifies SHA-256 integrity,
- * and decrypts inside the TEE. Returns the raw plaintext to the browser.
- * Spec: simplified_arch.md — POST /vault/read
+ * Downloads the encrypted blob, verifies SHA-256 integrity, and decrypts inside
+ * the TEE. Returns the raw plaintext to the browser.
+ *
+ * Phase 1: routed through the gateway MCP `vault_read` tool under the user's
+ * session. Note the MCP tool expects `expectedSha256` (mapped from contentSha256).
  */
 export async function vaultRead(
   nearAccountId: string,
@@ -146,41 +125,47 @@ export async function vaultRead(
   contentSha256: string,
   signal?: AbortSignal,
 ): Promise<{ plaintext: string; metadata: Record<string, unknown> }> {
-  return agentPost<{ plaintext: string; metadata: Record<string, unknown> }>('/vault/read', {
+  return callMcpTool<{ plaintext: string; metadata: Record<string, unknown> }>('vault_read', {
     nearAccountId,
     entryType,
     identifier,
     blobId,
-    contentSha256,
+    expectedSha256: contentSha256,
   }, signal);
 }
 
 // ─── Skill Execute ────────────────────────────────────────────────────────────
 
 /**
- * Loads the skill config from Walrus, applies ZDR firewall rules,
- * calls the LLM provider, and returns the assistant output.
+ * Executes a skill prompt through the ZDR egress firewall in the TEE.
  *
- * CRITICAL-R6: llmApiKey parameter removed — the key now lives in the agent's
- * AppState (loaded at startup from LLM_API_KEY env var). It is never accepted
- * in HTTP request bodies.
- * Spec: simplified_arch.md — POST /skills/execute
+ * Phase 1: routed through the gateway MCP `zdr_check` tool under the user's
+ * session (no shared agent key in the browser).
+ *
+ * KNOWN GAP (pre-existing, tracked for reconciliation): the skill-execute contract
+ * is inconsistent across the three layers — the agent's `ExecuteRequest` expects
+ * `{ blobId, expectedSha256, userInput }`, while the gateway `zdr_check` tool expects
+ * `{ skillName, prompt, model, destination }`. They do not line up, so end-to-end
+ * skill execution is not functional yet regardless of transport. Phase 1 only moves
+ * this off the direct-agent key path; reconciling the contract (or folding "skills"
+ * into the Memories model per PRODUCT_SPEC §9) is a separate task. We map the
+ * available fields best-effort so no shared secret is used.
  */
 export async function skillsExecute(
   nearAccountId: string,
   skillBlobId: string,
-  skillContentSha256: string,
+  _skillContentSha256: string,
   userPrompt: string,
   signal?: AbortSignal,
 ): Promise<{ output: string; zdrBlocked: boolean; zdrMarker?: string }> {
-  return agentPost<{ output: string; zdrBlocked: boolean; zdrMarker?: string }>(
-    '/skills/execute',
+  return callMcpTool<{ output: string; zdrBlocked: boolean; zdrMarker?: string }>(
+    'zdr_check',
     {
       nearAccountId,
-      skillBlobId,
-      skillContentSha256,
-      userPrompt,
-      // NOTE: llmApiKey intentionally omitted — loaded from server env (CRITICAL-R6)
+      skillName: skillBlobId, // best-effort: used for audit labeling only
+      prompt: userPrompt,
+      // `destination` is required by the firewall allowlist but not available at
+      // this call site under the current design — see KNOWN GAP above.
     },
     signal,
   );
