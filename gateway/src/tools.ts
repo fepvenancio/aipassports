@@ -88,10 +88,12 @@ export const TOOLS: readonly McpTool[] = [
   {
     name: "zdr_check",
     description:
-      "Execute an AI skill prompt through the IronClaw ZDR (Zero Data Residue) " +
-      "egress firewall. The firewall audits the prompt for sensitive content markers " +
-      "and verifies the destination URL is on the enclave allowlist before the " +
-      "request exits the enclave. Returns the AI model response or a firewall block reason.",
+      "Execute a stored skill through the IronClaw ZDR (Zero Data Residue) egress " +
+      "firewall. The skill config (model, system prompt, and the destination endpoint) " +
+      "is loaded from its encrypted blob inside the enclave — the destination is NOT " +
+      "caller-supplied, so it cannot be redirected at runtime. The firewall audits the " +
+      "request for sensitive markers and verifies the config's destination is on the " +
+      "enclave allowlist before egress. Returns the model output or a firewall block reason.",
     inputSchema: {
       type: "object",
       properties: {
@@ -99,27 +101,20 @@ export const TOOLS: readonly McpTool[] = [
           type: "string",
           description: "The NEAR account ID initiating the skill execution.",
         },
-        skillName: {
+        blobId: {
           type: "string",
-          description: "The name of the skill to execute (for audit logging).",
+          description: "Blob ID of the stored, encrypted skill config to execute.",
         },
-        prompt: {
+        expectedSha256: {
           type: "string",
-          description: "The prompt to send to the AI model through the firewall.",
+          description: "Expected SHA-256 of the skill config blob (integrity check).",
         },
-        model: {
+        userInput: {
           type: "string",
-          description: "The AI model to call (e.g. gpt-4o, claude-opus-4-5).",
-          default: "gpt-4o",
-        },
-        destination: {
-          type: "string",
-          description:
-            "The target AI API endpoint URL. Must be on the enclave allowlist " +
-            "(e.g. https://api.openai.com).",
+          description: "The user input passed to the skill prompt.",
         },
       },
-      required: ["nearAccountId", "skillName", "prompt", "destination"],
+      required: ["nearAccountId", "blobId", "expectedSha256", "userInput"],
     },
   },
   {

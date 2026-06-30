@@ -195,8 +195,8 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
           })));
         }
         if (url.includes("/skills/execute")) {
-          // If the prompt contains "leak_marker", mock a firewall block response
-          if (init?.body && JSON.parse(init.body as string).prompt?.includes("leak_marker")) {
+          // If the user input contains "leak_marker", mock a firewall block response
+          if (init?.body && JSON.parse(init.body as string).userInput?.includes("leak_marker")) {
             return Promise.resolve(new Response(
               JSON.stringify({
                 errorCode: "FIREWALL_ERROR_SENSITIVE_CONTENT",
@@ -750,9 +750,9 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
             name: "zdr_check",
             arguments: {
               nearAccountId: "alice.near",
-              skillName: "chat_helper",
-              prompt: "here is my leak_marker",
-              destination: "https://api.openai.com/v1/chat/completions"
+              blobId: "blob_chat_helper",
+              expectedSha256: "abcdef1234567890",
+              userInput: "here is my leak_marker"
             }
           }
         }),
@@ -766,17 +766,20 @@ describe("Worker Gateway Bridge - Security & Routing Tests", () => {
       }
     );
 
-    // Should return 200/OK containing the structured firewallBlock error, or return isError in the tool call response
+    // A firewall block is normalized to a successful tool result with zdrBlocked=true
+    // so clients can render the block instead of catching an exception.
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     const toolResult = JSON.parse(body.result.content[0].text);
-    expect(toolResult.success).toBe(false);
-    expect(toolResult.firewallBlock).toBe(true);
+    expect(toolResult.success).toBe(true);
+    expect(toolResult.zdrBlocked).toBe(true);
+    expect(toolResult.zdrMarker).toBe("PRIVATE_KEY");
 
-    // Verify D1 has recorded the block
+    // Verify D1 has recorded the block (skill identified by blobId; destination lives
+    // in the enclave config and is logged as a marker, not a caller-supplied URL).
     expect(DB.firewall_logs.length).toBe(1);
     expect(DB.firewall_logs[0]!.near_account_id).toBe("alice.near");
-    expect(DB.firewall_logs[0]!.skill_name).toBe("chat_helper");
+    expect(DB.firewall_logs[0]!.skill_name).toBe("blob_chat_helper");
     expect(DB.firewall_logs[0]!.rule_triggered).toBe("SENSITIVE_CONTENT_BLOCKED");
     expect(DB.firewall_logs[0]!.marker_detected).toBe("PRIVATE_KEY");
   });

@@ -137,24 +137,18 @@ export async function vaultRead(
 // ─── Skill Execute ────────────────────────────────────────────────────────────
 
 /**
- * Executes a skill prompt through the ZDR egress firewall in the TEE.
+ * Executes a stored skill through the ZDR egress firewall in the TEE.
  *
- * Phase 1: routed through the gateway MCP `zdr_check` tool under the user's
- * session (no shared agent key in the browser).
- *
- * KNOWN GAP (pre-existing, tracked for reconciliation): the skill-execute contract
- * is inconsistent across the three layers — the agent's `ExecuteRequest` expects
- * `{ blobId, expectedSha256, userInput }`, while the gateway `zdr_check` tool expects
- * `{ skillName, prompt, model, destination }`. They do not line up, so end-to-end
- * skill execution is not functional yet regardless of transport. Phase 1 only moves
- * this off the direct-agent key path; reconciling the contract (or folding "skills"
- * into the Memories model per PRODUCT_SPEC §9) is a separate task. We map the
- * available fields best-effort so no shared secret is used.
+ * Routed through the gateway MCP `zdr_check` tool under the user's session (no shared
+ * agent key in the browser). The contract matches the agent's `ExecuteRequest`:
+ * the skill's model and egress destination live in its encrypted config inside the
+ * enclave, so only the skill blob + integrity hash + user input are sent. The gateway
+ * normalizes the provider response to `{ output, zdrBlocked, zdrMarker }`.
  */
 export async function skillsExecute(
   nearAccountId: string,
   skillBlobId: string,
-  _skillContentSha256: string,
+  skillContentSha256: string,
   userPrompt: string,
   signal?: AbortSignal,
 ): Promise<{ output: string; zdrBlocked: boolean; zdrMarker?: string }> {
@@ -162,10 +156,9 @@ export async function skillsExecute(
     'zdr_check',
     {
       nearAccountId,
-      skillName: skillBlobId, // best-effort: used for audit labeling only
-      prompt: userPrompt,
-      // `destination` is required by the firewall allowlist but not available at
-      // this call site under the current design — see KNOWN GAP above.
+      blobId: skillBlobId,
+      expectedSha256: skillContentSha256,
+      userInput: userPrompt,
     },
     signal,
   );

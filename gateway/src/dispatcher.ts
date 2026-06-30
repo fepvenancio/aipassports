@@ -236,21 +236,44 @@ export async function handleVaultRead(
 }
 
 /**
- * @notice Execute an AI skill through the ZDR egress firewall.
+ * Extract the assistant text from a provider's raw chat-completion JSON.
+ * Best-effort across OpenAI-compatible (choices[0].message.content) and
+ * Anthropic (content[].text) shapes. Returns "" if no text field is found;
+ * the raw response is always passed through alongside for clients that need it.
+ */
+function extractAssistantText(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const r = raw as Record<string, any>;
+  const openai = r?.choices?.[0]?.message?.content;
+  if (typeof openai === "string") return openai;
+  if (Array.isArray(r?.content)) {
+    const block = r.content.find((b: any) => b?.type === "text" && typeof b?.text === "string");
+    if (block) return block.text as string;
+  }
+  return "";
+}
+
+/**
+ * @notice Execute a stored skill through the ZDR egress firewall.
+ * @dev Canonical contract matches the agent's `ExecuteRequest`
+ *      ({ nearAccountId, blobId, expectedSha256, userInput }). The model and the
+ *      egress destination live inside the encrypted skill config in the enclave and
+ *      are NOT caller-supplied. The agent returns the provider's raw response, which
+ *      we normalize to { output, zdrBlocked } for clients.
  */
 export async function handleZdrCheck(
   env: Env,
   args: Record<string, unknown>,
 ): Promise<McpToolCallResult> {
-  const { nearAccountId, skillName, prompt, model, destination } = args;
+  const { nearAccountId, blobId, expectedSha256, userInput } = args;
 
   if (
     typeof nearAccountId !== "string" ||
-    typeof skillName !== "string" ||
-    typeof prompt !== "string" ||
-    typeof destination !== "string"
+    typeof blobId !== "string" ||
+    typeof expectedSha256 !== "string" ||
+    typeof userInput !== "string"
   ) {
-    return errorResult("INVALID_ARGS", "nearAccountId, skillName, prompt, and destination must be strings.");
+    return errorResult("INVALID_ARGS", "nearAccountId, blobId, expectedSha256, and userInput must be strings.");
   }
 
   try {
@@ -258,51 +281,60 @@ export async function handleZdrCheck(
       env,
       path: "/skills/execute",
       subject: nearAccountId,
-      body: {
-        nearAccountId,
-        skillName,
-        prompt,
-        model: typeof model === "string" ? model : "gpt-4o",
-        destination,
-      },
+      body: { nearAccountId, blobId, expectedSha256, userInput },
     });
 
+    // Agent returns the provider's raw JSON; normalize to a stable client shape.
     return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          success: true,
+          zdrBlocked: false,
+          output: extractAssistantText(result),
+          raw: result,
+        }),
+      }],
     };
   } catch (e) {
-    // Surface firewall blocks clearly so the caller understands the rejection reason.
     const msg = String(e);
     const isFirewallBlock =
       msg.includes("FIREWALL_ERROR_DESTINATION_BLOCKED") ||
       msg.includes("FIREWALL_ERROR_SENSITIVE_CONTENT");
 
-    if (isFirewallBlock && env.DB) {
-      try {
-        let ruleTriggered = "UNKNOWN";
-        let markerDetected: string | null = null;
-        if (msg.includes("FIREWALL_ERROR_DESTINATION_BLOCKED")) {
-          ruleTriggered = "DESTINATION_BLOCKED";
-        } else if (msg.includes("FIREWALL_ERROR_SENSITIVE_CONTENT")) {
-          ruleTriggered = "SENSITIVE_CONTENT_BLOCKED";
-          const match = msg.match(/sensitive word: ([A-Z_]+)/i) || msg.match(/contained marker (\w+)/);
-          if (match) {
-            markerDetected = match[1] ?? null;
-          }
-        }
+    if (!isFirewallBlock) {
+      // Genuine failure (e.g. blob not found, provider error) — surface as an error.
+      return errorResult("ZDR_CHECK_FAILED", msg);
+    }
 
+    // Firewall block: classify, audit, and return a structured (non-error) result so
+    // clients can render the block instead of catching an exception.
+    let ruleTriggered = "UNKNOWN";
+    let markerDetected: string | null = null;
+    if (msg.includes("FIREWALL_ERROR_DESTINATION_BLOCKED")) {
+      ruleTriggered = "DESTINATION_BLOCKED";
+    } else if (msg.includes("FIREWALL_ERROR_SENSITIVE_CONTENT")) {
+      ruleTriggered = "SENSITIVE_CONTENT_BLOCKED";
+      const match = msg.match(/sensitive word: ([A-Z_]+)/i) || msg.match(/contained marker (\w+)/);
+      if (match) markerDetected = match[1] ?? null;
+    }
+
+    if (env.DB) {
+      try {
+        // The real egress destination lives in the enclave skill config and is not
+        // visible to the gateway; we log the skill blobId and an enclave-config marker.
         await env.DB.prepare(
           "INSERT INTO firewall_audit_logs (near_account_id, timestamp, skill_name, destination, rule_triggered, marker_detected) VALUES (?, ?, ?, ?, ?, ?)"
         ).bind(
           nearAccountId,
           Date.now(),
-          skillName,
-          destination,
+          blobId,
+          "enclave-config",
           ruleTriggered,
           markerDetected
         ).run();
-      } catch (dbErr) {
-        // Silent failure for logging to ensure we don't break the client response
+      } catch {
+        // Best-effort logging — never break the client response.
       }
     }
 
@@ -310,12 +342,12 @@ export async function handleZdrCheck(
       content: [{
         type: "text",
         text: JSON.stringify({
-          success: false,
-          firewallBlock: isFirewallBlock,
-          error: msg,
+          success: true,
+          zdrBlocked: true,
+          zdrMarker: markerDetected,
+          ruleTriggered,
         }),
       }],
-      isError: true,
     };
   }
 }
